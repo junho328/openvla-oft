@@ -54,9 +54,11 @@ RUN_ROOT_DIR="${RUN_ROOT_DIR:-/home/work/aipr-jhna/output/twoarmpeginhole/mappo_
 TOTAL_TIMESTEPS=10000
 NUM_STEPS_PER_ROLLOUT=16
 BATCH_SIZE=4
-LEARNING_RATE=3e-4
-ACTOR_LR=1e-4
-CRITIC_LR=5e-4
+# Conservative learning rates for VLA-based multi-agent RL
+# Actor (policy): Lower lr for stable policy updates
+# Critic (value): Slightly higher lr for faster value function convergence
+ACTOR_LR=5e-5
+CRITIC_LR=1e-4
 
 # Environment settings
 REWARD_SHAPING=true
@@ -108,7 +110,6 @@ TRAIN_ARGS=(
     --total_timesteps $TOTAL_TIMESTEPS
     --num_steps_per_rollout $NUM_STEPS_PER_ROLLOUT
     --num_minibatches $BATCH_SIZE
-    --learning_rate $LEARNING_RATE
     --actor_lr $ACTOR_LR
     --critic_lr $CRITIC_LR
     --reward_shaping $REWARD_SHAPING
