@@ -70,14 +70,13 @@ NUM_ACTIONS_CHUNK=1
 
 # Environment settings
 REWARD_SHAPING=true
-MAX_EPISODE_STEPS=400
+MAX_EPISODE_STEPS=500
 
 # Navigate to project root
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR/../../../.."
 
 # Setup environment
-export WANDB_MODE=offline
 export OMP_NUM_THREADS=4
 
 # NCCL settings for optimal performance
@@ -144,7 +143,7 @@ TRAIN_ARGS=(
     --history_length 2
     --num_actions_chunk $NUM_ACTIONS_CHUNK
     --seed 42
-    --run_id_note "seperate_value_heads"
+    --run_id_note "action_dist_projector"
     # ACPPO specific
     --use_action_dist_input true
     --detach_action_dist_grad true
@@ -161,6 +160,8 @@ echo "Starting distributed training with $NUM_GPUS GPUs..."
 echo "Log file: $LOG_FILE"
 echo ""
 
+export WANDB_MODE=online
+
 # Run with torchrun for distributed training
 # --standalone: Single node training
 # --nnodes=1: Number of nodes
@@ -173,6 +174,7 @@ nohup torchrun \
     --rdzv_endpoint=localhost:29500 \
     -m experiments.robot.twoarmpeginhole.acppo.train_acppo \
     "${TRAIN_ARGS[@]}" > "$LOG_FILE" 2>&1 &
+
 # torchrun \
 #     --standalone \
 #     --nnodes=1 \

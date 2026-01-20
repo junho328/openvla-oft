@@ -412,14 +412,15 @@ class MAPPOTrainer:
                     ).unsqueeze(0)
                     agent_proprios.append(proprio_tensor)
                 
-                # Forward pass
+                # Forward pass - get per-agent values
                 actions, log_probs, entropies, values = policy_module.get_actions_and_values(
                     agent_inputs=agent_inputs,
                     agent_proprios=agent_proprios,
                     deterministic=False,
                 )
                 
-                value = torch.stack(values).mean().float().cpu().numpy()
+                # Store per-agent values
+                per_agent_values = [v[0].float().cpu().numpy() for v in values]
             
             # Action processing
             action_0_normalized = actions[0][0, 0].float().cpu().numpy()
@@ -434,6 +435,11 @@ class MAPPOTrainer:
             
             full_action = np.concatenate([action_0, action_1])
             next_obs, reward, done, info = self.env.step(full_action.tolist())
+            
+            # Early termination if peg and hole are too far apart
+            peg_hole_dist = info.get("reward/peg_hole_dist", float('inf'))
+            if peg_hole_dist > self.cfg.max_peg_hole_distance:
+                done = True
             
             # Track step-wise rewards for logging
             step_rewards.append(reward)
@@ -476,14 +482,15 @@ class MAPPOTrainer:
                     wrist_list.append(agent_obs[agent_idx]['images'][t * 2 + 1])
                 wrist_images_np.append(np.stack(wrist_list, axis=0)[np.newaxis, ...])
             
+            # Store per-agent values
             self.buffer.add(
                 front_images=front_images_np,
                 wrist_images=wrist_images_np,
                 proprio_states=[np.expand_dims(ps, 0) for ps in proprio_states_np],
                 actions=[np.expand_dims(a, 0) for a in actions_np],
                 log_probs=[np.expand_dims(lp, 0) for lp in log_probs_np],
+                values=[np.expand_dims(v, 0) for v in per_agent_values],  # Per-agent values
                 reward=np.array([team_reward]),
-                value=np.array([value]),
                 done=np.array([float(done)]),
             )
             
@@ -512,7 +519,7 @@ class MAPPOTrainer:
             
             self.global_step += 1
         
-        # Compute final value
+        # Compute final per-agent values
         with torch.no_grad():
             agent_obs = self.obs_history.get_all_agent_observations(include_history=True)
             agent_inputs = []
@@ -532,10 +539,12 @@ class MAPPOTrainer:
                 agent_proprios.append(proprio_tensor)
             
             last_values = policy_module.get_values(agent_inputs=agent_inputs, agent_proprios=agent_proprios)
-            last_value = torch.stack(last_values).mean().float().cpu().numpy()
+            # Convert to per-agent numpy arrays
+            last_values_np = [v.float().cpu().numpy() for v in last_values]
         
+        # Compute per-agent returns and advantages
         self.buffer.compute_returns_and_advantages(
-            last_values=np.array([last_value]),
+            last_values=last_values_np,
             last_dones=np.array([float(done)]),
         )
         
@@ -586,15 +595,20 @@ class MAPPOTrainer:
         task_descriptions = [self.task_desc_robot0, self.task_desc_robot1]
         policy_module = self.policy.module if self.distributed else self.policy
         
+        # Per-agent stats tracking
+        agent_policy_losses = [[] for _ in range(TWOARM_MAPPO_CONSTANTS["NUM_AGENTS"])]
+        agent_value_losses = [[] for _ in range(TWOARM_MAPPO_CONSTANTS["NUM_AGENTS"])]
+        
         for epoch in range(self.cfg.num_epochs):
             for batch in self.buffer.get(batch_size):
-                batch_advantages = batch.advantages
-                batch_returns = batch.returns
-                batch_old_values = batch.old_values
-                
-                if self.cfg.normalize_advantages:
-                    # Use global normalization across all GPUs for consistent training
-                    batch_advantages = self._normalize_advantages_global(batch_advantages)
+                # Use per-agent advantages
+                batch_agent_advantages = []
+                for agent_idx in range(TWOARM_MAPPO_CONSTANTS["NUM_AGENTS"]):
+                    adv = batch.agent_advantages[agent_idx]
+                    if self.cfg.normalize_advantages:
+                        # Use global normalization across all GPUs for consistent training
+                        adv = self._normalize_advantages_global(adv)
+                    batch_agent_advantages.append(adv)
                 
                 all_new_log_probs = []
                 all_entropies = []
@@ -672,28 +686,52 @@ class MAPPOTrainer:
                     else:
                         new_log_probs = agent_old_log_probs
                         entropies = torch.zeros_like(agent_old_log_probs)
-                        new_values = batch_old_values
+                        new_values = batch.agent_old_values[agent_idx]
                     
                     all_new_log_probs.append(new_log_probs)
                     all_entropies.append(entropies)
                     all_new_values.append(new_values)
                 
+                # Compute per-agent policy and value losses
                 all_policy_losses = []
+                all_value_losses = []
                 all_clip_fracs = []
                 all_approx_kl = []
                 
                 for agent_idx in range(TWOARM_MAPPO_CONSTANTS["NUM_AGENTS"]):
                     agent_old_log_probs = batch.agent_old_log_probs[agent_idx]
                     new_log_probs = all_new_log_probs[agent_idx]
+                    agent_advantages = batch_agent_advantages[agent_idx]  # Per-agent advantage
+                    agent_returns = batch.agent_returns[agent_idx]  # Per-agent returns
+                    agent_old_values = batch.agent_old_values[agent_idx]  # Per-agent old values
+                    new_values = all_new_values[agent_idx]  # Per-agent new values
                     
                     log_ratio = new_log_probs - agent_old_log_probs
                     ratio = torch.exp(log_ratio)
                     
-                    surr1 = ratio * batch_advantages
-                    surr2 = torch.clamp(ratio, 1.0 - self.cfg.clip_epsilon, 1.0 + self.cfg.clip_epsilon) * batch_advantages
+                    # Use per-agent advantage for policy loss
+                    surr1 = ratio * agent_advantages
+                    surr2 = torch.clamp(ratio, 1.0 - self.cfg.clip_epsilon, 1.0 + self.cfg.clip_epsilon) * agent_advantages
                     
                     policy_loss = -torch.min(surr1, surr2).mean()
                     all_policy_losses.append(policy_loss)
+                    agent_policy_losses[agent_idx].append(policy_loss.item())
+                    
+                    # Compute per-agent value loss
+                    if self.cfg.clip_value_loss:
+                        values_clipped = agent_old_values + torch.clamp(
+                            new_values - agent_old_values, 
+                            -self.cfg.clip_epsilon, 
+                            self.cfg.clip_epsilon
+                        )
+                        value_loss_unclipped = (new_values - agent_returns) ** 2
+                        value_loss_clipped = (values_clipped - agent_returns) ** 2
+                        value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
+                    else:
+                        value_loss = 0.5 * ((new_values - agent_returns) ** 2).mean()
+                    
+                    all_value_losses.append(value_loss)
+                    agent_value_losses[agent_idx].append(value_loss.item())
                     
                     with torch.no_grad():
                         approx_kl = ((ratio - 1) - log_ratio).mean()
@@ -701,17 +739,10 @@ class MAPPOTrainer:
                         clip_frac = ((ratio - 1.0).abs() > self.cfg.clip_epsilon).float().mean()
                         all_clip_fracs.append(clip_frac)
                 
+                # Aggregate losses across agents
                 policy_loss = torch.stack(all_policy_losses).mean().float()
+                value_loss = torch.stack(all_value_losses).mean().float()  # Averaged per-agent value losses
                 entropy = torch.stack(all_entropies).mean().float()
-                new_values_mean = torch.stack(all_new_values).mean(dim=0).float()
-                
-                if self.cfg.clip_value_loss:
-                    values_clipped = batch_old_values + torch.clamp(new_values_mean - batch_old_values, -self.cfg.clip_epsilon, self.cfg.clip_epsilon)
-                    value_loss_unclipped = (new_values_mean - batch_returns) ** 2
-                    value_loss_clipped = (values_clipped - batch_returns) ** 2
-                    value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
-                else:
-                    value_loss = 0.5 * ((new_values_mean - batch_returns) ** 2).mean()
                 
                 entropy_loss = -entropy.mean()
                 loss = policy_loss + self.cfg.value_loss_coef * value_loss + self.cfg.entropy_coef * entropy_loss
@@ -740,6 +771,29 @@ class MAPPOTrainer:
             "update/approx_kl": np.mean(approx_kls),
             "update/clip_fraction": np.mean(clip_fractions),
         }
+        
+        # Per-agent stats for analysis
+        for agent_idx in range(TWOARM_MAPPO_CONSTANTS["NUM_AGENTS"]):
+            stats[f"update/agent{agent_idx}_policy_loss"] = np.mean(agent_policy_losses[agent_idx])
+            stats[f"update/agent{agent_idx}_value_loss"] = np.mean(agent_value_losses[agent_idx])
+        
+        # Diagnostic stats: value/advantage distributions per agent
+        for agent_idx in range(TWOARM_MAPPO_CONSTANTS["NUM_AGENTS"]):
+            flat_values = self.buffer.values[agent_idx].flatten()
+            flat_returns = self.buffer.returns[agent_idx].flatten()
+            flat_advantages = self.buffer.advantages[agent_idx].flatten()
+            
+            stats[f"debug/agent{agent_idx}_value_mean"] = np.mean(flat_values)
+            stats[f"debug/agent{agent_idx}_value_std"] = np.std(flat_values)
+            stats[f"debug/agent{agent_idx}_return_mean"] = np.mean(flat_returns)
+            stats[f"debug/agent{agent_idx}_return_std"] = np.std(flat_returns)
+            stats[f"debug/agent{agent_idx}_advantage_mean"] = np.mean(flat_advantages)
+            stats[f"debug/agent{agent_idx}_advantage_std"] = np.std(flat_advantages)
+        
+        # Value head difference diagnostic
+        v0_mean = np.mean(self.buffer.values[0].flatten())
+        v1_mean = np.mean(self.buffer.values[1].flatten())
+        stats["debug/value_head_diff"] = abs(v1_mean - v0_mean)
         
         return self._average_stats(stats)
     
@@ -816,6 +870,12 @@ class MAPPOTrainer:
                 
                 full_action = np.concatenate([action_0, action_1])
                 next_obs, reward, done, info = self.env.step(full_action.tolist())
+                
+                # Early termination if peg and hole are too far apart
+                peg_hole_dist = info.get("reward/peg_hole_dist", float('inf'))
+                if peg_hole_dist > self.cfg.max_peg_hole_distance:
+                    done = True
+                
                 obs = next_obs
                 episode_reward += reward
                 episode_length += 1

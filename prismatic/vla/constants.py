@@ -47,7 +47,7 @@ BRIDGE_CONSTANTS = {
 # TwoArmPegInHole constants (for MAPPO training)
 # ACTION_DIM=6 because TwoArm has no gripper (6-DoF only)
 TWOARM_CONSTANTS = {
-    "NUM_ACTIONS_CHUNK": 2,   # Reduced chunk size for RL (faster iteration)
+    "NUM_ACTIONS_CHUNK": 1,   # Reduced chunk size for RL (faster iteration)
     "ACTION_DIM": 6,          # 6-DoF per arm (no gripper, different from LIBERO=7)
     "PROPRIO_DIM": 8,         # EEF pos (3) + axis-angle (3) + padding (2)
     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
@@ -55,7 +55,7 @@ TWOARM_CONSTANTS = {
 
 # TwoArmPegInHole constants for ACPPO training (larger action chunks)
 TWOARM_ACPPO_CONSTANTS = {
-    "NUM_ACTIONS_CHUNK": 2,   # Larger chunk size for ACPPO
+    "NUM_ACTIONS_CHUNK": 1,   # Larger chunk size for ACPPO
     "ACTION_DIM": 6,          # 6-DoF per arm (no gripper)
     "PROPRIO_DIM": 8,         # EEF pos (3) + axis-angle (3) + padding (2)
     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,

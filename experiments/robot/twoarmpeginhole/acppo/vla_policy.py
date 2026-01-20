@@ -56,6 +56,25 @@ def print_rank0(*args, **kwargs):
         print(*args, **kwargs)
 
 
+class PassThroughProjector(nn.Module):
+    """
+    Pass-through projector that returns input as-is.
+    
+    This is used when proprio has already been projected to llm_dim space.
+    Instead of projecting again, we just pass the pre-projected value through.
+    
+    Used in ACPPO when combining separately projected proprio and action_dist:
+    - Proprio and action_dist are projected separately to llm_dim
+    - They are combined (sum) to get final proprio_combined
+    - PassThroughProjector is temporarily swapped in to avoid double projection
+    """
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x):
+        return x
+
+
 class ValueHead(nn.Module):
     """
     Value Head MLP for estimating state value from VLA hidden states.
@@ -422,8 +441,12 @@ class VLAAgentACPPO(nn.Module):
         else:
             action = dist.rsample()
         
+        # Compute log_prob BEFORE clipping (for correct gradient flow)
         log_prob = dist.log_prob(action).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1)
+        
+        # Clip action to [-1, 1] for proper unnormalization
+        action = torch.clamp(action, -1.0, 1.0)
         
         action = action.reshape(batch_size, self.num_actions_chunk, self.action_dim)
         
@@ -520,8 +543,12 @@ class VLAAgentACPPO(nn.Module):
         else:
             action = dist.rsample()
         
+        # Compute log_prob BEFORE clipping (for correct gradient flow)
         log_prob = dist.log_prob(action).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1)
+        
+        # Clip action to [-1, 1] for proper unnormalization
+        action = torch.clamp(action, -1.0, 1.0)
         
         action = action.reshape(batch_size, self.num_actions_chunk, self.action_dim)
         
@@ -607,7 +634,7 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
         vla_model: nn.Module,
         action_head: nn.Module,
         proprio_projector: Optional[nn.Module] = None,
-        proprio_projector_extended: Optional[nn.Module] = None,  # For agent 1 with action dist
+        action_dist_projector: Optional[nn.Module] = None,  # For agent 1 - projects action dist separately
         noisy_action_projector: Optional[nn.Module] = None,
         processor: Any = None,
         device: torch.device = torch.device("cuda"),
@@ -646,22 +673,36 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
             value_head_num_layers=cfg.value_num_layers,
         )
         
-        # Extended proprio projector for agent 1 (proprio + action_dist)
-        # This projects the extended proprio (8 + action_dist_dim) to the same space
-        if cfg.use_action_dist_input and proprio_projector_extended is not None:
-            self.proprio_projector_extended = proprio_projector_extended
-        else:
-            # Create extended proprio projector if not provided
-            llm_dim = vla_model.llm_dim if hasattr(vla_model, 'llm_dim') else 4096
-            from prismatic.models.projectors import ProprioProjector
-            self.proprio_projector_extended = ProprioProjector(
-                llm_dim=llm_dim,
-                proprio_dim=cfg.proprio_dim_agent1,  # 8 + action_dist_dim
-            ).to(torch.bfloat16).to(device)
-            print_rank0(f"Created extended proprio projector: input={cfg.proprio_dim_agent1}, output={llm_dim}")
+        # Action distribution projector for agent 1 (separate projection)
+        # Projects mu and sigma to llm_dim space, then combines with proprio projection
+        self.action_dist_projector = None
+        if cfg.use_action_dist_input:
+            if action_dist_projector is not None:
+                # Use provided projector
+                self.action_dist_projector = action_dist_projector
+            else:
+                # Create new projector
+                llm_dim = vla_model.llm_dim if hasattr(vla_model, 'llm_dim') else 4096
+                from prismatic.models.projectors import ProprioProjector
+                self.action_dist_projector = ProprioProjector(
+                    llm_dim=llm_dim,
+                    proprio_dim=cfg.action_dist_dim,  # mu + sigma flattened
+                ).to(torch.bfloat16).to(device)
+            
+            # Set trainable based on config (for both provided and newly created)
+            for param in self.action_dist_projector.parameters():
+                param.requires_grad = cfg.train_action_dist_projector
+            
+            if action_dist_projector is None:
+                print_rank0(f"Created action distribution projector: input={cfg.action_dist_dim}, output={llm_dim}, trainable={cfg.train_action_dist_projector}")
+            else:
+                print_rank0(f"Using provided action distribution projector, trainable={cfg.train_action_dist_projector}")
         
         # Cache for storing estimated action distribution
         self._cached_action_dist: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        
+        # Reusable pass-through projector (singleton to avoid memory issues)
+        self._pass_through_projector = PassThroughProjector()
     
     def estimate_agent0_action_dist(
         self,
@@ -745,30 +786,37 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                 proprio_agent1_as_robot0=agent_proprios[1] if agent_proprios else None,
             )
             
-            # Step 2: Concatenate estimated action dist with Agent 1's proprio
-            # proprio_1_extended = [proprio_1; mu_0_est; sigma_0_est]
+            # Step 2: Separate projection - project proprio and action dist separately
             if agent_proprios is not None:
                 proprio_1 = agent_proprios[1]
                 batch_size = proprio_1.shape[0]
                 
-                # Flatten mu and sigma if needed
-                mu_flat = mu_0_est.reshape(batch_size, -1)
-                sigma_flat = sigma_0_est.reshape(batch_size, -1)
+                # Action head outputs: (B, chunk_len, action_dim) -> flatten to (B, chunk_len * action_dim)
+                # mu: [mu1, mu2, ..., mu12] (all mu values first)
+                # sigma: [sigma1, sigma2, ..., sigma12] (all sigma values second)
+                # Concatenate: [mu1, mu2, ..., mu12, sigma1, sigma2, ..., sigma12]
+                mu_flat = mu_0_est.reshape(batch_size, -1)  # (B, chunk_len * action_dim)
+                sigma_flat = sigma_0_est.reshape(batch_size, -1)  # (B, chunk_len * action_dim)
+                action_dist_flat = torch.cat([mu_flat, sigma_flat], dim=-1)  # (B, action_dist_dim)
                 
-                # Concatenate: (B, proprio_dim) + (B, action_dim*chunks) + (B, action_dim*chunks)
-                proprio_1_extended = torch.cat([proprio_1, mu_flat, sigma_flat], dim=-1)
+                # Project separately: proprio -> llm_dim, action_dist -> llm_dim
+                proprio_proj = self.shared_agent.proprio_projector(proprio_1)  # (B, llm_dim)
+                action_dist_proj = self.action_dist_projector(action_dist_flat)  # (B, llm_dim)
+                
+                # Combine projections: element-wise sum (or could use concat + linear)
+                proprio_combined = proprio_proj + action_dist_proj  # (B, llm_dim)
             else:
-                proprio_1_extended = None
+                proprio_combined = None
             
-            # Use extended proprio projector for agent 1
-            # Temporarily swap proprio projector
+            # Temporarily modify VLAAgent to accept pre-projected proprio
+            # We need to bypass the proprio projector since we already projected
             original_proprio_projector = self.shared_agent.proprio_projector
-            self.shared_agent.proprio_projector = self.proprio_projector_extended
+            self.shared_agent.proprio_projector = self._pass_through_projector
             
             action_1, log_prob_1, entropy_1, mu_1, sigma_1 = self.shared_agent.get_action_and_log_prob(
                 inputs=agent_inputs[1],
-                proprio=proprio_1_extended,
-                use_proprio=self.cfg.use_proprio,
+                proprio=proprio_combined,  # Already projected
+                use_proprio=True,  # Always True since we're passing pre-projected
                 use_film=self.cfg.use_film,
                 deterministic=deterministic,
             )
@@ -836,24 +884,31 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                 mu_0_est = torch.zeros(batch_size, action_dist_dim, device=self.device)
                 sigma_0_est = torch.ones(batch_size, action_dist_dim, device=self.device)
             
-            # Create extended proprio for agent 1
+            # Separate projection for agent 1
             if agent_proprios is not None:
                 proprio_1 = agent_proprios[1]
                 batch_size = proprio_1.shape[0]
-                mu_flat = mu_0_est.reshape(batch_size, -1)
-                sigma_flat = sigma_0_est.reshape(batch_size, -1)
-                proprio_1_extended = torch.cat([proprio_1, mu_flat, sigma_flat], dim=-1)
+                # Flatten mu and sigma: [mu1, mu2, ..., mu12] and [sigma1, sigma2, ..., sigma12]
+                mu_flat = mu_0_est.reshape(batch_size, -1)  # (B, chunk_len * action_dim)
+                sigma_flat = sigma_0_est.reshape(batch_size, -1)  # (B, chunk_len * action_dim)
+                # Concatenate: [mu1, mu2, ..., mu12, sigma1, sigma2, ..., sigma12]
+                action_dist_flat = torch.cat([mu_flat, sigma_flat], dim=-1)  # (B, action_dist_dim)
+                
+                # Project separately
+                proprio_proj = self.shared_agent.proprio_projector(proprio_1)
+                action_dist_proj = self.action_dist_projector(action_dist_flat)
+                proprio_combined = proprio_proj + action_dist_proj
             else:
-                proprio_1_extended = None
+                proprio_combined = None
             
-            # Use extended proprio projector
+            # Use pass-through projector
             original_proprio_projector = self.shared_agent.proprio_projector
-            self.shared_agent.proprio_projector = self.proprio_projector_extended
+            self.shared_agent.proprio_projector = self._pass_through_projector
             
             value_1 = self.shared_agent.get_value(
                 inputs=agent_inputs[1],
-                proprio=proprio_1_extended,
-                use_proprio=self.cfg.use_proprio,
+                proprio=proprio_combined,
+                use_proprio=True,
                 use_film=self.cfg.use_film,
                 agent_idx=1,  # ACPPO: use agent 1's value head
             )
@@ -918,24 +973,31 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                 proprio_agent1_as_robot0=agent_proprios[1] if agent_proprios else None,
             )
             
-            # Create extended proprio
+            # Separate projection for agent 1
             if agent_proprios is not None:
                 proprio_1 = agent_proprios[1]
                 batch_size = proprio_1.shape[0]
-                mu_flat = mu_0_est.reshape(batch_size, -1)
-                sigma_flat = sigma_0_est.reshape(batch_size, -1)
-                proprio_1_extended = torch.cat([proprio_1, mu_flat, sigma_flat], dim=-1)
+                # Flatten mu and sigma: [mu1, mu2, ..., mu12] and [sigma1, sigma2, ..., sigma12]
+                mu_flat = mu_0_est.reshape(batch_size, -1)  # (B, chunk_len * action_dim)
+                sigma_flat = sigma_0_est.reshape(batch_size, -1)  # (B, chunk_len * action_dim)
+                # Concatenate: [mu1, mu2, ..., mu12, sigma1, sigma2, ..., sigma12]
+                action_dist_flat = torch.cat([mu_flat, sigma_flat], dim=-1)  # (B, action_dist_dim)
+                
+                # Project separately
+                proprio_proj = self.shared_agent.proprio_projector(proprio_1)
+                action_dist_proj = self.action_dist_projector(action_dist_flat)
+                proprio_combined = proprio_proj + action_dist_proj
             else:
-                proprio_1_extended = None
+                proprio_combined = None
             
-            # Use extended proprio projector
+            # Use pass-through projector
             original_proprio_projector = self.shared_agent.proprio_projector
-            self.shared_agent.proprio_projector = self.proprio_projector_extended
+            self.shared_agent.proprio_projector = self._pass_through_projector
             
             action_1, log_prob_1, entropy_1, value_1, mu_1, sigma_1 = self.shared_agent.get_action_and_value(
                 inputs=agent_inputs[1],
-                proprio=proprio_1_extended,
-                use_proprio=self.cfg.use_proprio,
+                proprio=proprio_combined,
+                use_proprio=True,
                 use_film=self.cfg.use_film,
                 deterministic=deterministic,
                 agent_idx=1,  # ACPPO: use agent 1's value head
@@ -962,12 +1024,13 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
         return actions, log_probs, entropies, values, action_means, action_stds
     
     def get_trainable_parameters(self) -> List[nn.Parameter]:
-        """Get trainable parameters including extended proprio projector."""
+        """Get trainable parameters including action distribution projector."""
         params = self.shared_agent.get_trainable_parameters()
         
-        # Add extended proprio projector parameters
-        if hasattr(self, 'proprio_projector_extended') and self.proprio_projector_extended is not None:
-            params.extend([p for p in self.proprio_projector_extended.parameters() if p.requires_grad])
+        # Add action distribution projector parameters (if trainable)
+        if hasattr(self, 'action_dist_projector') and self.action_dist_projector is not None:
+            if self.cfg.train_action_dist_projector:
+                params.extend([p for p in self.action_dist_projector.parameters() if p.requires_grad])
         
         return params
     
@@ -993,26 +1056,36 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                 agent_idx=0,  # ACPPO: use agent 0's value head
             )
         else:
-            # Agent 1 with extended proprio
+            # Agent 1 with separate projection
             if self.cfg.use_action_dist_input and estimated_action_dist is not None:
                 mu_0_est, sigma_0_est = estimated_action_dist
                 
                 if proprio is not None:
                     batch_size = proprio.shape[0]
-                    mu_flat = mu_0_est.reshape(batch_size, -1)
-                    sigma_flat = sigma_0_est.reshape(batch_size, -1)
-                    proprio_extended = torch.cat([proprio, mu_flat, sigma_flat], dim=-1)
+                    # Flatten mu and sigma: [mu1, mu2, ..., mu12] and [sigma1, sigma2, ..., sigma12]
+                    mu_flat = mu_0_est.reshape(batch_size, -1)  # (B, chunk_len * action_dim)
+                    sigma_flat = sigma_0_est.reshape(batch_size, -1)  # (B, chunk_len * action_dim)
+                    # Concatenate: [mu1, mu2, ..., mu12, sigma1, sigma2, ..., sigma12]
+                    action_dist_flat = torch.cat([mu_flat, sigma_flat], dim=-1)  # (B, action_dist_dim)
+                    
+                    # Ensure dtype matches projector (bfloat16)
+                    action_dist_flat = action_dist_flat.to(dtype=torch.bfloat16)
+                    
+                    # Project separately
+                    proprio_proj = self.shared_agent.proprio_projector(proprio)
+                    action_dist_proj = self.action_dist_projector(action_dist_flat)
+                    proprio_combined = proprio_proj + action_dist_proj
                 else:
-                    proprio_extended = None
+                    proprio_combined = None
                 
                 original_proprio_projector = self.shared_agent.proprio_projector
-                self.shared_agent.proprio_projector = self.proprio_projector_extended
+                self.shared_agent.proprio_projector = self._pass_through_projector
                 
                 result = self.shared_agent.evaluate_actions_and_value(
                     inputs=inputs,
                     actions=actions,
-                    proprio=proprio_extended,
-                    use_proprio=self.cfg.use_proprio,
+                    proprio=proprio_combined,
+                    use_proprio=True,  # Always True: proprio_combined is already projected to llm_dim
                     use_film=self.cfg.use_film,
                     agent_idx=1,  # ACPPO: use agent 1's value head
                 )
@@ -1079,7 +1152,7 @@ def load_vla_for_acppo(
     Load VLA model and components for ACPPO training.
     
     Returns:
-        Tuple of (vla_model, action_head, proprio_projector, proprio_projector_extended,
+        Tuple of (vla_model, action_head, proprio_projector, action_dist_projector,
                   noisy_action_projector, processor, norm_stats)
     """
     import sys
@@ -1127,16 +1200,25 @@ def load_vla_for_acppo(
             )
             proprio_projector = proprio_projector.to(torch.bfloat16).to(device)
     
-    # Extended proprio projector (for agent 1 with action dist)
-    proprio_projector_extended = None
+    # Action distribution projector (for agent 1 - separate projection)
+    action_dist_projector = None
     if cfg.use_proprio and cfg.use_action_dist_input:
-        print_rank0(f"Creating extended proprio projector for agent 1:")
-        print_rank0(f"  Input dim: {cfg.proprio_dim_agent1} (proprio={cfg.proprio_dim_agent0} + action_dist={cfg.action_dist_dim})")
-        proprio_projector_extended = ProprioProjector(
+        print_rank0(f"Creating action distribution projector for agent 1:")
+        print_rank0(f"  Input dim: {cfg.action_dist_dim} (mu + sigma)")
+        print_rank0(f"  Output dim: {vla.llm_dim}")
+        print_rank0(f"  Trainable: {cfg.train_action_dist_projector}")
+        action_dist_projector = ProprioProjector(
             llm_dim=vla.llm_dim,
-            proprio_dim=cfg.proprio_dim_agent1,
+            proprio_dim=cfg.action_dist_dim,  # mu + sigma flattened
         )
-        proprio_projector_extended = proprio_projector_extended.to(torch.bfloat16).to(device)
+        action_dist_projector = action_dist_projector.to(torch.bfloat16).to(device)
+        
+        # Set trainable based on config
+        for param in action_dist_projector.parameters():
+            param.requires_grad = cfg.train_action_dist_projector
+    
+    # For backward compatibility, keep proprio_projector_extended as None
+    proprio_projector_extended = None
     
     # Action head
     action_head = None
@@ -1166,4 +1248,4 @@ def load_vla_for_acppo(
         noisy_action_projector = NoisyActionProjector(llm_dim=vla.llm_dim)
         noisy_action_projector = noisy_action_projector.to(torch.bfloat16).to(device)
     
-    return vla, action_head, proprio_projector, proprio_projector_extended, noisy_action_projector, processor, norm_stats
+    return vla, action_head, proprio_projector, action_dist_projector, noisy_action_projector, processor, norm_stats

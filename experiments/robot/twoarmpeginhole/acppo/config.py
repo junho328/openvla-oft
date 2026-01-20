@@ -24,7 +24,7 @@ class NormalizationType(str, Enum):
 # TwoArmPegInHole ACPPO specific constants
 TWOARM_ACPPO_CONSTANTS = {
     "NUM_AGENTS": 2,                          # Two agents (one per arm)
-    "NUM_ACTIONS_CHUNK": 2,                   # Action chunk size
+    "NUM_ACTIONS_CHUNK": 1,                   # Action chunk size
     "ACTION_DIM": 6,                          # 6-DoF per arm (no gripper)
     "PROPRIO_DIM": 8,                         # EEF pos (3) + axis-angle (3) + padding (2)
     "HISTORY_LENGTH": 2,                      # Number of historical frames
@@ -32,7 +32,7 @@ TWOARM_ACPPO_CONSTANTS = {
     "TOTAL_IMAGES_WITH_HISTORY": 4,           # (front + wrist) * history_length
     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
     # Action distribution dimensions for chaining
-    "ACTION_DIST_DIM": 24,                    # 6 action * 2 chunk * 2 (mu + sigma) = 24
+    "ACTION_DIST_DIM": 12,                    # 6 action * 1 chunk * 2 (mu + sigma) = 12
 }
 
 
@@ -69,7 +69,7 @@ class ACPPOConfig:
     history_length: int = 2                           # Number of frames in history (current + previous)
     
     # Action space
-    num_actions_chunk: int = 2                        # Action chunk size
+    num_actions_chunk: int = 1                        # Action chunk size
     action_dim: int = 6                               # 6-DoF per arm (no gripper)
     
     # LoRA
@@ -84,21 +84,22 @@ class ACPPOConfig:
     train_proprio_projector: bool = True
     train_action_head: bool = True
     train_value_head: bool = True
+    train_action_dist_projector: bool = True  # Whether to train action distribution projector for agent 1
     
     #################################################################################################################
     # ACPPO Specific Parameters
     #################################################################################################################
     
     # Action distribution for chaining
-    action_dist_dim: int = 24                         # 6 * 2 * 2 = 24 (mu + sigma)
+    action_dist_dim: int = 12                         # 6 * 1 * 2 = 12 (mu + sigma) - auto-adjusted in __post_init__ based on num_actions_chunk
     use_action_dist_input: bool = True                # Whether second agent uses estimated action dist
     detach_action_dist_grad: bool = True              # No gradient through action dist estimation
     
     # Extended proprio dimension for second agent (proprio + action_dist)
     # Agent 0: proprio_dim = 8
-    # Agent 1: proprio_dim = 8 + 24 = 32 (proprio + estimated action dist)
+    # Agent 1: proprio_dim = 8 + 12 = 20 (proprio + estimated action dist)
     proprio_dim_agent0: int = 8
-    proprio_dim_agent1: int = 32                      # 8 + 24
+    proprio_dim_agent1: int = 20                      # 8 + 12 (auto-adjusted in __post_init__)
     
     #################################################################################################################
     # ACPPO/PPO Hyperparameters
@@ -151,6 +152,11 @@ class ACPPOConfig:
     env_img_res: int = 256
     max_episode_steps: int = 300
     num_steps_wait: int = 10
+    
+    # Early termination
+    max_peg_hole_distance: float = 0.4  # Early terminate if peg-hole distance exceeds this (in meters)
+                                         # Note: Initial distance in "opposed" config is ~0.18m (18cm)
+                                         # Setting to 0.4m (~2.2x initial) allows tolerance before early termination
     
     # Task description
     instruction_mode: str = "shared"

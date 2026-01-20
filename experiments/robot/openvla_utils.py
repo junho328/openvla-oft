@@ -81,29 +81,66 @@ def update_auto_map(pretrained_checkpoint: str) -> None:
         print(f"Warning: No config.json found at {config_path}")
         return
 
-    # Create timestamped backup
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = os.path.join(pretrained_checkpoint, f"config.json.back.{timestamp}")
-    shutil.copy2(config_path, backup_path)
-    print(f"Created backup of original config at: {os.path.abspath(backup_path)}")
+    # Use file locking to prevent race conditions in multi-process environments
+    lock_path = config_path + ".lock"
+    import fcntl
+    
+    max_retries = 10
+    retry_delay = 0.1
+    
+    for attempt in range(max_retries):
+        try:
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                
+                # Check if already updated (another process might have done it)
+                try:
+                    with open(config_path, "r") as f:
+                        config = json.load(f)
+                    
+                    if "auto_map" in config and config["auto_map"].get("AutoConfig") == "configuration_prismatic.OpenVLAConfig":
+                        # Already updated, skip
+                        return
+                except (json.JSONDecodeError, KeyError):
+                    # File might be corrupted or in process of being written, retry
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                
+                # Create timestamped backup
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = os.path.join(pretrained_checkpoint, f"config.json.back.{timestamp}")
+                shutil.copy2(config_path, backup_path)
+                print(f"Created backup of original config at: {os.path.abspath(backup_path)}")
 
-    # Read and update the config
-    with open(config_path, "r") as f:
-        config = json.load(f)
+                # Update the config
+                config["auto_map"] = {
+                    "AutoConfig": "configuration_prismatic.OpenVLAConfig",
+                    "AutoModelForVision2Seq": "modeling_prismatic.OpenVLAForActionPrediction",
+                }
 
-    config["auto_map"] = {
-        "AutoConfig": "configuration_prismatic.OpenVLAConfig",
-        "AutoModelForVision2Seq": "modeling_prismatic.OpenVLAForActionPrediction",
-    }
+                # Write back the updated config
+                with open(config_path, "w") as f:
+                    json.dump(config, f, indent=2)
 
-    # Write back the updated config
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2)
-
-    print(f"Updated config.json at: {os.path.abspath(config_path)}")
-    print("Changes made:")
-    print('  - Set AutoConfig to "configuration_prismatic.OpenVLAConfig"')
-    print('  - Set AutoModelForVision2Seq to "modeling_prismatic.OpenVLAForActionPrediction"')
+                print(f"Updated config.json at: {os.path.abspath(config_path)}")
+                print("Changes made:")
+                print('  - Set AutoConfig to "configuration_prismatic.OpenVLAConfig"')
+                print('  - Set AutoModelForVision2Seq to "modeling_prismatic.OpenVLAForActionPrediction"')
+                
+                # Release lock
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                break
+                
+        except BlockingIOError:
+            # Another process has the lock, wait and retry
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+            else:
+                print(f"Warning: Could not acquire lock for {config_path} after {max_retries} attempts")
+        except Exception as e:
+            print(f"Warning: Error updating config.json: {e}")
+            break
 
 
 def check_identical_files(path1: Union[str, Path], path2: Union[str, Path]) -> bool:

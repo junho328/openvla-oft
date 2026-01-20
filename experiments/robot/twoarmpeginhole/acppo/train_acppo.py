@@ -230,7 +230,7 @@ class ACPPOTrainer:
     
     def _init_policy(self):
         """Initialize VLA policy with ACPPO extensions."""
-        vla, action_head, proprio_projector, proprio_projector_extended, \
+        vla, action_head, proprio_projector, action_dist_projector, \
             noisy_action_projector, processor, norm_stats = load_vla_for_acppo(self.cfg, self.device)
         
         self.raw_policy = MultiAgentVLAPolicyACPPO(
@@ -238,7 +238,7 @@ class ACPPOTrainer:
             vla_model=vla,
             action_head=action_head,
             proprio_projector=proprio_projector,
-            proprio_projector_extended=proprio_projector_extended,
+            action_dist_projector=action_dist_projector,
             noisy_action_projector=noisy_action_projector,
             processor=processor,
             device=self.device,
@@ -423,6 +423,11 @@ class ACPPOTrainer:
             
             full_action = np.concatenate([action_0, action_1])
             next_obs, reward, done, info = self.env.step(full_action.tolist())
+            
+            # Early termination if peg and hole are too far apart
+            peg_hole_dist = info.get("reward/peg_hole_dist", float('inf'))
+            if peg_hole_dist > self.cfg.max_peg_hole_distance:
+                done = True
             
             step_rewards.append(reward)
             
@@ -891,6 +896,12 @@ class ACPPOTrainer:
                 
                 full_action = np.concatenate([action_0, action_1])
                 next_obs, reward, done, info = self.env.step(full_action.tolist())
+                
+                # Early termination if peg and hole are too far apart
+                peg_hole_dist = info.get("reward/peg_hole_dist", float('inf'))
+                if peg_hole_dist > self.cfg.max_peg_hole_distance:
+                    done = True
+                
                 obs = next_obs
                 episode_reward += reward
                 episode_length += 1

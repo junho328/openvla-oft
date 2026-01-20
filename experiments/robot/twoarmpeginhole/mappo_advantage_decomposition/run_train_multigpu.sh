@@ -44,7 +44,7 @@ fi
 
 # Default configuration
 WANDB_ENTITY="acpo"
-WANDB_PROJECT="mappo-twoarm-multigpu"
+WANDB_PROJECT="acppo-twoarm-multigpu"
 
 # Output directory
 RUN_ROOT_DIR="${RUN_ROOT_DIR:-/home/work/aipr-jhna/output/twoarmpeginhole/mappo_advantage_decomposition}"
@@ -60,14 +60,14 @@ CRITIC_LR=5e-4
 
 # Environment settings
 REWARD_SHAPING=true
-MAX_EPISODE_STEPS=400
+MAX_EPISODE_STEPS=500
 
 # Navigate to project root
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR/../../../.."
 
 # Setup environment
-export WANDB_MODE=offline
+export WANDB_MODE=online
 export OMP_NUM_THREADS=4
 
 # NCCL settings for optimal performance
@@ -127,9 +127,9 @@ TRAIN_ARGS=(
     --eval_freq 50
     --save_freq 100
     --history_length 2
-    --num_actions_chunk 2
+    --num_actions_chunk 1
     --seed 42
-    --run_id_note "multigpu_${NUM_GPUS}gpus"
+    --run_id_note "mappo_advantage_decomposition"
 )
 
 # Add resume checkpoint if provided
@@ -160,7 +160,7 @@ nohup torchrun \
 #     --nproc_per_node=$NUM_GPUS \
 #     --rdzv_backend=c10d \
 #     --rdzv_endpoint=localhost:29500 \
-#     -m experiments.robot.twoarmpeginhole.mappo.train_mappo \
+#     -m experiments.robot.twoarmpeginhole.mappo_advantage_decomposition.train_mappo_advantage_decomposition \
 #     "${TRAIN_ARGS[@]}"
 
 PID=$!

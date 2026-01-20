@@ -119,14 +119,14 @@ class VLAAgent(nn.Module):
     
     Architecture:
         VLA Backbone ─┬─────────→ Action Head → Action (policy/actor)
-                      └─────────→ Value Head  → Value (critic)
+                      └─────────→ Value Heads → Per-agent Values (critic)
     
-    Both heads share the same VLA hidden states representation.
+    All Value Heads share the same VLA hidden states representation.
     
     Key difference from Fine-tuning:
     - VLA backbone can be frozen (only heads train)
     - Action output becomes stochastic (mean + std for exploration)
-    - Value Head added for critic (shares VLA hidden states)
+    - Multiple Value Heads for per-agent value estimation
     - Uses PPO loss instead of L1 loss
     """
     
@@ -148,9 +148,10 @@ class VLAAgent(nn.Module):
         train_value_head: bool = True,
         value_head_hidden_dim: int = 512,
         value_head_num_layers: int = 2,
+        num_agents: int = 2,  # Per-agent value heads
     ):
         """
-        Initialize VLA agent with both Action Head and Value Head.
+        Initialize VLA agent with both Action Head and per-agent Value Heads.
         
         Args:
             vla_model: Pretrained OpenVLA model
@@ -169,6 +170,7 @@ class VLAAgent(nn.Module):
             train_value_head: If True, train value head MLP
             value_head_hidden_dim: Hidden dimension for value head
             value_head_num_layers: Number of layers in value head
+            num_agents: Number of agents (creates separate value heads for each)
         """
         super().__init__()
         
@@ -182,6 +184,7 @@ class VLAAgent(nn.Module):
         self.num_actions_chunk = num_actions_chunk
         self.total_action_dim = action_dim * num_actions_chunk
         self.device = device
+        self.num_agents = num_agents
         
         # Store training flags
         self.freeze_vla_backbone = freeze_vla_backbone
@@ -189,19 +192,23 @@ class VLAAgent(nn.Module):
         self.train_action_head = train_action_head
         self.train_value_head = train_value_head
         
-        # Get VLA hidden dimension for Value Head
+        # Get VLA hidden dimension for Value Heads
         llm_dim = vla_model.llm_dim if hasattr(vla_model, 'llm_dim') else 4096
         
-        # Create Value Head (shares VLA hidden states with Action Head)
-        # Input: hidden states from action tokens (action_dim * num_actions_chunk * llm_dim)
-        # We'll use pooled representation, so input is llm_dim
-        self.value_head = ValueHead(
-            input_dim=llm_dim,
-            hidden_dim=value_head_hidden_dim,
-            num_layers=value_head_num_layers,
-        ).to(torch.bfloat16).to(device)
+        # Create per-agent Value Heads (each shares VLA hidden states with Action Head)
+        # This enables separate value estimation per agent
+        self.value_heads = nn.ModuleList([
+            ValueHead(
+                input_dim=llm_dim,
+                hidden_dim=value_head_hidden_dim,
+                num_layers=value_head_num_layers,
+            ).to(torch.bfloat16).to(device)
+            for _ in range(num_agents)
+        ])
+        # For backward compatibility
+        self.value_head = self.value_heads[0]
         
-        print_rank0(f"\nCreated Value Head on top of VLA backbone:")
+        print_rank0(f"\nCreated {num_agents} per-agent Value Heads on top of VLA backbone:")
         print_rank0(f"  Input dim: {llm_dim}")
         print_rank0(f"  Hidden dim: {value_head_hidden_dim}")
         print_rank0(f"  Num layers: {value_head_num_layers}")
@@ -257,16 +264,12 @@ class VLAAgent(nn.Module):
                 for param in self.action_head.parameters():
                     param.requires_grad = False
         
-        # Freeze/unfreeze value head
-        if self.value_head is not None:
-            if self.train_value_head:
-                print_rank0("Value head is trainable")
-                for param in self.value_head.parameters():
-                    param.requires_grad = True
-            else:
-                print_rank0("Freezing value head...")
-                for param in self.value_head.parameters():
-                    param.requires_grad = False
+        # Freeze/unfreeze per-agent value heads
+        if self.value_heads is not None:
+            for value_head in self.value_heads:
+                for param in value_head.parameters():
+                    param.requires_grad = self.train_value_head
+            print_rank0(f"{self.num_agents} Value heads {'trainable' if self.train_value_head else 'frozen'}")
     
     def _print_trainable_summary(self):
         """Print summary of trainable parameters."""
@@ -292,13 +295,14 @@ class VLAAgent(nn.Module):
             trainable_params += ah_trainable
             print_rank0(f"  Action head: {ah_trainable:,} / {ah_total:,} trainable")
         
-        # Value head
-        if self.value_head is not None:
-            vh_total = sum(p.numel() for p in self.value_head.parameters())
-            vh_trainable = sum(p.numel() for p in self.value_head.parameters() if p.requires_grad)
-            total_params += vh_total
-            trainable_params += vh_trainable
-            print_rank0(f"  Value head: {vh_trainable:,} / {vh_total:,} trainable")
+        # Per-agent value heads
+        if self.value_heads is not None:
+            for i, vh in enumerate(self.value_heads):
+                vh_total = sum(p.numel() for p in vh.parameters())
+                vh_trainable = sum(p.numel() for p in vh.parameters() if p.requires_grad)
+                total_params += vh_total
+                trainable_params += vh_trainable
+                print_rank0(f"  Value head (agent {i}): {vh_trainable:,} / {vh_total:,} trainable")
         
         # Proprio projector
         if self.proprio_projector is not None:
@@ -336,9 +340,10 @@ class VLAAgent(nn.Module):
         if self.action_head is not None and self.train_action_head:
             params.extend([p for p in self.action_head.parameters() if p.requires_grad])
         
-        # Value head (if trainable)
-        if self.value_head is not None and self.train_value_head:
-            params.extend([p for p in self.value_head.parameters() if p.requires_grad])
+        # Per-agent value heads (if trainable)
+        if self.value_heads is not None and self.train_value_head:
+            for vh in self.value_heads:
+                params.extend([p for p in vh.parameters() if p.requires_grad])
         
         # Proprio projector (if trainable)
         if self.proprio_projector is not None and self.train_proprio_projector:
@@ -569,15 +574,17 @@ class VLAAgent(nn.Module):
         proprio: Optional[torch.Tensor] = None,
         use_proprio: bool = True,
         use_film: bool = False,
+        agent_idx: int = 0,  # Use per-agent value head
     ) -> torch.Tensor:
         """
-        Get state value from Value Head.
+        Get state value from per-agent Value Head.
         
         Args:
             inputs: Processed VLA inputs
             proprio: Proprioceptive state
             use_proprio: Whether to use proprio
             use_film: Whether to use FiLM
+            agent_idx: Index of agent to use corresponding value head
             
         Returns:
             Value tensor (B,)
@@ -587,8 +594,8 @@ class VLAAgent(nn.Module):
             inputs, proprio, use_proprio, use_film
         )
         
-        # Use Value Head to compute value from hidden states
-        value = self.value_head(text_hidden_states)
+        # Use per-agent Value Head to compute value from hidden states
+        value = self.value_heads[agent_idx](text_hidden_states)
         
         return value
     
@@ -599,12 +606,14 @@ class VLAAgent(nn.Module):
         use_proprio: bool = True,
         use_film: bool = False,
         deterministic: bool = False,
+        agent_idx: int = 0,  # Use per-agent value head
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Get action, log probability, entropy, AND value in one forward pass.
         
         This is efficient because both Action Head and Value Head share
         the same VLA hidden states - we only run VLA backbone once!
+        Uses per-agent value head V^(agent_idx).
         
         Args:
             inputs: Processed VLA inputs
@@ -612,6 +621,7 @@ class VLAAgent(nn.Module):
             use_proprio: Whether to use proprio
             use_film: Whether to use FiLM
             deterministic: If True, return mean action
+            agent_idx: Index of agent to use corresponding value head
             
         Returns:
             Tuple of (action, log_prob, entropy, value)
@@ -653,8 +663,8 @@ class VLAAgent(nn.Module):
         # Reshape action
         action = action.reshape(batch_size, self.num_actions_chunk, self.action_dim)
         
-        # === Value Head ===
-        value = self.value_head(text_hidden_states)
+        # === Per-agent Value Head ===
+        value = self.value_heads[agent_idx](text_hidden_states)
         
         return action, log_prob, entropy, value
     
@@ -665,11 +675,13 @@ class VLAAgent(nn.Module):
         proprio: Optional[torch.Tensor] = None,
         use_proprio: bool = True,
         use_film: bool = False,
+        agent_idx: int = 0,  # Use per-agent value head
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Evaluate actions AND get value in one forward pass.
         
         Used during PPO update to compute both policy loss and value loss.
+        Uses per-agent value head V^(agent_idx).
         
         Args:
             inputs: Processed VLA inputs
@@ -677,6 +689,7 @@ class VLAAgent(nn.Module):
             proprio: Proprioceptive state
             use_proprio: Whether to use proprio
             use_film: Whether to use FiLM
+            agent_idx: Index of agent to use corresponding value head
             
         Returns:
             Tuple of (log_prob, entropy, value)
@@ -706,8 +719,8 @@ class VLAAgent(nn.Module):
         log_prob = dist.log_prob(actions_flat).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1)
         
-        # === Value computation ===
-        value = self.value_head(text_hidden_states)
+        # === Per-agent value computation ===
+        value = self.value_heads[agent_idx](text_hidden_states)
         
         return log_prob, entropy, value
 
@@ -759,10 +772,12 @@ class MultiAgentVLAPolicy(nn.Module):
         print_rank0(f"  Train action head: {cfg.train_action_head}")
         print_rank0(f"  Train proprio projector: {cfg.train_proprio_projector}")
         print_rank0(f"  Shared policy: {cfg.share_policy}")
+        print_rank0(f"  Per-agent Value Heads: {self.num_agents}")
         print_rank0("="*60 + "\n")
         
         if self.share_policy:
-            # Create single shared agent with both Action Head and Value Head
+            # Create single shared agent with per-agent Value Heads
+            # VLAAgent.value_heads contains V^(0), V^(1), ..., V^(N-1)
             self.shared_agent = VLAAgent(
                 vla_model=vla_model,
                 action_head=action_head,
@@ -778,11 +793,12 @@ class MultiAgentVLAPolicy(nn.Module):
                 train_value_head=cfg.train_value_head,
                 value_head_hidden_dim=cfg.value_hidden_dim,
                 value_head_num_layers=cfg.value_num_layers,
+                num_agents=self.num_agents,  # Creates per-agent value heads
             )
             self.agents = [self.shared_agent] * self.num_agents
         else:
             # Create separate agents (would need separate model copies)
-            # For now, we'll share the backbone but could have separate heads
+            # Each agent has its own value heads
             self.agents = nn.ModuleList([
                 VLAAgent(
                     vla_model=vla_model,
@@ -799,6 +815,7 @@ class MultiAgentVLAPolicy(nn.Module):
                     train_value_head=cfg.train_value_head,
                     value_head_hidden_dim=cfg.value_hidden_dim,
                     value_head_num_layers=cfg.value_num_layers,
+                    num_agents=self.num_agents,  # Creates per-agent value heads
                 )
                 for _ in range(self.num_agents)
             ])
@@ -886,14 +903,17 @@ class MultiAgentVLAPolicy(nn.Module):
         agent_proprios: Optional[List[torch.Tensor]] = None,
     ) -> List[torch.Tensor]:
         """
-        Get state values for all agents using Value Head.
+        Get state values for all agents using per-agent Value Heads.
+        
+        Each agent uses its own Value Head V^(i) for value estimation.
+        VLA forward is called ONCE per agent, hidden states are reused.
         
         Args:
             agent_inputs: List of processed VLA inputs per agent
             agent_proprios: List of proprio states per agent
             
         Returns:
-            List of value tensors for all agents
+            List of value tensors for all agents [V^(0), V^(1), ..., V^(N-1)]
         """
         values = []
         
@@ -901,12 +921,15 @@ class MultiAgentVLAPolicy(nn.Module):
             inputs = agent_inputs[agent_idx]
             proprio = agent_proprios[agent_idx] if agent_proprios else None
             
-            value = agent.get_value(
+            # Get hidden states from agent (single VLA forward)
+            text_hidden_states, _ = agent.forward(
                 inputs=inputs,
                 proprio=proprio,
                 use_proprio=self.cfg.use_proprio,
                 use_film=self.cfg.use_film,
             )
+            # Use per-agent value head from VLAAgent.value_heads
+            value = agent.value_heads[agent_idx](text_hidden_states)
             
             values.append(value)
         
@@ -921,7 +944,8 @@ class MultiAgentVLAPolicy(nn.Module):
         """
         Get actions AND values for all agents in one efficient forward pass.
         
-        This is efficient because Action Head and Value Head share VLA hidden states.
+        Uses per-agent Value Heads V^(i) for value estimation.
+        VLA forward is called ONCE per agent - hidden states are reused for action and value.
         
         Args:
             agent_inputs: List of processed VLA inputs per agent
@@ -940,13 +964,45 @@ class MultiAgentVLAPolicy(nn.Module):
             inputs = agent_inputs[agent_idx]
             proprio = agent_proprios[agent_idx] if agent_proprios else None
             
-            action, log_prob, entropy, value = agent.get_action_and_value(
+            # === Single VLA forward pass ===
+            text_hidden_states, num_patches = agent.forward(
                 inputs=inputs,
                 proprio=proprio,
                 use_proprio=self.cfg.use_proprio,
                 use_film=self.cfg.use_film,
-                deterministic=deterministic,
             )
+            
+            batch_size = inputs["input_ids"].shape[0]
+            action_hidden_dim = agent.num_actions_chunk * agent.action_dim
+            
+            # Extract action hidden states
+            if text_hidden_states.shape[1] >= action_hidden_dim:
+                action_hidden_states = text_hidden_states[:, :action_hidden_dim, :]
+            else:
+                pad_len = action_hidden_dim - text_hidden_states.shape[1]
+                padding = torch.zeros(
+                    batch_size, pad_len, text_hidden_states.shape[-1],
+                    device=text_hidden_states.device, dtype=text_hidden_states.dtype
+                )
+                action_hidden_states = torch.cat([text_hidden_states, padding], dim=1)
+            
+            # === Action computation from shared hidden states ===
+            dist = agent.get_action_distribution(action_hidden_states)
+            
+            if deterministic:
+                action = dist.mean
+            else:
+                action = dist.rsample()
+            
+            log_prob = dist.log_prob(action).sum(dim=-1)
+            entropy = dist.entropy().sum(dim=-1)
+            
+            # Clip action and reshape
+            action = torch.clamp(action, -1.0, 1.0)
+            action = action.reshape(batch_size, agent.num_actions_chunk, agent.action_dim)
+            
+            # === Per-agent value computation from shared hidden states ===
+            value = agent.value_heads[agent_idx](text_hidden_states)
             
             actions.append(action)
             log_probs.append(log_prob)
@@ -963,6 +1019,9 @@ class MultiAgentVLAPolicy(nn.Module):
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
         """
         Evaluate actions AND get values in one forward pass (for PPO update).
+        
+        Uses per-agent Value Heads V^(i) for value estimation.
+        VLA forward is called ONCE per agent - hidden states are reused.
         
         Args:
             agent_inputs: List of processed VLA inputs per agent
@@ -981,12 +1040,15 @@ class MultiAgentVLAPolicy(nn.Module):
             actions = agent_actions[agent_idx]
             proprio = agent_proprios[agent_idx] if agent_proprios else None
             
+            # Use per-agent value head with agent_idx
+            # VLA forward is called ONCE inside evaluate_actions_and_value
             log_prob, entropy, value = agent.evaluate_actions_and_value(
                 inputs=inputs,
                 actions=actions,
                 proprio=proprio,
                 use_proprio=self.cfg.use_proprio,
                 use_film=self.cfg.use_film,
+                agent_idx=agent_idx,  # Use per-agent value head
             )
             
             log_probs.append(log_prob)
@@ -1030,6 +1092,9 @@ class MultiAgentVLAPolicy(nn.Module):
         """
         Forward pass for evaluating a single agent's actions.
         
+        Uses per-agent Value Head V^(agent_idx) for value computation.
+        VLA forward is called ONCE - hidden states are reused for action eval and value.
+        
         IMPORTANT: This method should be called through the DDP wrapper to ensure
         proper gradient synchronization across GPUs. Do NOT call this on .module directly.
         
@@ -1042,12 +1107,17 @@ class MultiAgentVLAPolicy(nn.Module):
         Returns:
             Tuple of (log_prob, entropy, value)
         """
-        return self.agents[agent_idx].evaluate_actions_and_value(
+        agent = self.agents[agent_idx]
+        
+        # Use per-agent value head with agent_idx
+        # VLA forward is called ONCE inside evaluate_actions_and_value
+        return agent.evaluate_actions_and_value(
             inputs=inputs,
             actions=actions,
             proprio=proprio,
             use_proprio=self.cfg.use_proprio,
             use_film=self.cfg.use_film,
+            agent_idx=agent_idx,  # Use per-agent value head
         )
     
     def forward(

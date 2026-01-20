@@ -439,6 +439,11 @@ class MAPPOTrainer:
             full_action = np.concatenate([action_0, action_1])
             next_obs, reward, done, info = self.env.step(full_action.tolist())
             
+            # Early termination if peg and hole are too far apart
+            peg_hole_dist = info.get("reward/peg_hole_dist", float('inf'))
+            if peg_hole_dist > self.cfg.max_peg_hole_distance:
+                done = True
+            
             # Track step-wise rewards for logging
             step_rewards.append(reward)
             
@@ -869,6 +874,12 @@ class MAPPOTrainer:
                 
                 full_action = np.concatenate([action_0, action_1])
                 next_obs, reward, done, info = self.env.step(full_action.tolist())
+                
+                # Early termination if peg and hole are too far apart
+                peg_hole_dist = info.get("reward/peg_hole_dist", float('inf'))
+                if peg_hole_dist > self.cfg.max_peg_hole_distance:
+                    done = True
+                
                 obs = next_obs
                 episode_reward += reward
                 episode_length += 1

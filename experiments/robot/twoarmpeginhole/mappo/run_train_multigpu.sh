@@ -60,14 +60,14 @@ CRITIC_LR=5e-4
 
 # Environment settings
 REWARD_SHAPING=true
-MAX_EPISODE_STEPS=300
+MAX_EPISODE_STEPS=500
 
 # Navigate to project root
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR/../../../.."
 
 # Setup environment
-export WANDB_MODE=online
+export WANDB_MODE=offline
 export OMP_NUM_THREADS=4
 
 # NCCL settings for optimal performance
@@ -112,10 +112,10 @@ TRAIN_ARGS=(
     --actor_lr $ACTOR_LR
     --critic_lr $CRITIC_LR
     --reward_shaping $REWARD_SHAPING
-    --reaching_weight 0.4
-    --perpendicular_weight 1.2
-    --parallel_weight 0.6
-    --alignment_weight 1.2
+    --reaching_weight 1.0
+    --perpendicular_weight 1.0
+    --parallel_weight 1.0
+    --alignment_weight 1.0
     --max_episode_steps $MAX_EPISODE_STEPS
     --use_wandb true
     --wandb_entity "$WANDB_ENTITY"
@@ -124,10 +124,10 @@ TRAIN_ARGS=(
     --use_l1_regression true
     --save_eval_videos true
     --num_eval_videos 2
-    --eval_freq 100
+    --eval_freq 50
     --save_freq 100
     --history_length 2
-    --num_actions_chunk 2
+    --num_actions_chunk 1
     --seed 42
     --run_id_note "multigpu_${NUM_GPUS}gpus"
 )
@@ -146,22 +146,22 @@ echo ""
 # --standalone: Single node training
 # --nnodes=1: Number of nodes
 # --nproc_per_node: Number of processes (GPUs) per node
-nohup torchrun \
-    --standalone \
-    --nnodes=1 \
-    --nproc_per_node=$NUM_GPUS \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint=localhost:29500 \
-    -m experiments.robot.twoarmpeginhole.mappo.train_mappo \
-    "${TRAIN_ARGS[@]}" > "$LOG_FILE" 2>&1 &
-# torchrun \
+# nohup torchrun \
 #     --standalone \
 #     --nnodes=1 \
 #     --nproc_per_node=$NUM_GPUS \
 #     --rdzv_backend=c10d \
 #     --rdzv_endpoint=localhost:29500 \
 #     -m experiments.robot.twoarmpeginhole.mappo.train_mappo \
-#     "${TRAIN_ARGS[@]}"
+#     "${TRAIN_ARGS[@]}" > "$LOG_FILE" 2>&1 &
+torchrun \
+    --standalone \
+    --nnodes=1 \
+    --nproc_per_node=$NUM_GPUS \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=localhost:29500 \
+    -m experiments.robot.twoarmpeginhole.mappo.train_mappo \
+    "${TRAIN_ARGS[@]}"
 
 PID=$!
 echo "Training started with PID: $PID"
