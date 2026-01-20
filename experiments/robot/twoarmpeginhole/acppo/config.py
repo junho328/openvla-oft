@@ -117,9 +117,10 @@ class ACPPOConfig:
     max_grad_norm: float = 0.5
     
     # Training
-    learning_rate: float = 3e-4
-    actor_lr: float = 1e-4
-    critic_lr: float = 5e-4
+    # Note: learning_rate is deprecated. Use actor_lr and critic_lr instead.
+    learning_rate: float = 3e-4  # Kept for backward compatibility (not used)
+    actor_lr: float = 5e-5       # Conservative lr for VLA-based policy (actor)
+    critic_lr: float = 1e-4      # Slightly higher lr for value function (critic)
     
     num_envs: int = 1                                 # Number of parallel environments PER GPU
     num_steps_per_rollout: int = 256                  # Steps per rollout before update

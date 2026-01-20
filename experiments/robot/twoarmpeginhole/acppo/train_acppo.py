@@ -277,18 +277,33 @@ class ACPPOTrainer:
                 self.action_norm_stats = norm_stats[unnorm_key]["action"]
     
     def _init_optimizer(self):
+        """Initialize optimizer with separate learning rates for actor and critic."""
         if self.distributed:
-            trainable_params = self.raw_policy.get_trainable_parameters()
+            policy_module = self.raw_policy
         else:
-            trainable_params = self.policy.get_trainable_parameters()
+            policy_module = self.policy
         
-        self._trainable_params = trainable_params
+        # Get separate parameter groups for actor and critic
+        actor_params = policy_module.get_actor_parameters()
+        critic_params = policy_module.get_critic_parameters()
+        
+        # Store all trainable params for gradient clipping
+        self._trainable_params = actor_params + critic_params
         
         if self.rank == 0:
-            total_trainable = sum(p.numel() for p in trainable_params)
+            actor_count = sum(p.numel() for p in actor_params)
+            critic_count = sum(p.numel() for p in critic_params)
+            total_trainable = actor_count + critic_count
+            logger.info(f"Actor parameters: {actor_count:,} (lr={self.cfg.actor_lr})")
+            logger.info(f"Critic parameters: {critic_count:,} (lr={self.cfg.critic_lr})")
             logger.info(f"Total trainable parameters: {total_trainable:,}")
         
-        self.optimizer = optim.Adam(trainable_params, lr=self.cfg.learning_rate)
+        # Create optimizer with separate learning rates
+        param_groups = [
+            {'params': actor_params, 'lr': self.cfg.actor_lr},
+            {'params': critic_params, 'lr': self.cfg.critic_lr},
+        ]
+        self.optimizer = optim.Adam(param_groups)
 
     def _log_config(self):
         config_path = self.run_dir / "config.json"

@@ -339,6 +339,37 @@ class VLAAgentACPPO(nn.Module):
         
         return params
     
+    def get_actor_parameters(self) -> List[nn.Parameter]:
+        """Get actor (policy) parameters - action head, proprio projector, log_std, VLA backbone (if not frozen)."""
+        params = []
+        
+        # VLA backbone (if trainable)
+        if not self.freeze_vla_backbone:
+            params.extend([p for p in self.vla.parameters() if p.requires_grad])
+        
+        # Action head
+        if self.action_head is not None and self.train_action_head:
+            params.extend([p for p in self.action_head.parameters() if p.requires_grad])
+        
+        # Proprio projector
+        if self.proprio_projector is not None and self.train_proprio_projector:
+            params.extend([p for p in self.proprio_projector.parameters() if p.requires_grad])
+        
+        # Log std for action distribution
+        params.append(self.log_std)
+        
+        return params
+    
+    def get_critic_parameters(self) -> List[nn.Parameter]:
+        """Get critic (value function) parameters - all value heads."""
+        params = []
+        
+        if self.value_heads is not None and self.train_value_head:
+            for vh in self.value_heads:
+                params.extend([p for p in vh.parameters() if p.requires_grad])
+        
+        return params
+    
     def _get_num_patches(self, use_proprio: bool = False, use_diffusion: bool = False) -> int:
         if self._num_patches is None:
             num_patches = self.vla.vision_backbone.get_num_patches()
@@ -1033,6 +1064,21 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                 params.extend([p for p in self.action_dist_projector.parameters() if p.requires_grad])
         
         return params
+    
+    def get_actor_parameters(self) -> List[nn.Parameter]:
+        """Get actor (policy) parameters including action distribution projector."""
+        params = self.shared_agent.get_actor_parameters()
+        
+        # Action distribution projector is part of actor (affects policy decisions for agent 1)
+        if hasattr(self, 'action_dist_projector') and self.action_dist_projector is not None:
+            if self.cfg.train_action_dist_projector:
+                params.extend([p for p in self.action_dist_projector.parameters() if p.requires_grad])
+        
+        return params
+    
+    def get_critic_parameters(self) -> List[nn.Parameter]:
+        """Get critic (value function) parameters."""
+        return self.shared_agent.get_critic_parameters()
     
     def forward_evaluate_agent(
         self,
