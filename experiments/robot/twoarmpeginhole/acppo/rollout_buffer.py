@@ -47,14 +47,20 @@ class MultiAgentRolloutBufferACPPO:
     Key differences from MAPPO buffer:
     1. Stores per-agent values V^(i) instead of single centralized value
     2. Stores action distributions (mu, sigma) for agent chaining
-    3. Computes per-agent advantages using microstep-based GAE
+    3. Computes per-agent advantages using microstep-based GAE or shared reward GAE
     
-    ACPPO TD Residuals:
+    GAE Modes:
+    1. "acppo_microstep" - Original ACPPO microstep TD residuals:
         ζ_t^(i) = γ' V^(i+1)([s_t, b_t^(i+1)]) - V^(i)([s_t, b_t^(i)])  for i < N
         ζ_t^(N) = r_t + γ' V^(1)(s_{t+1}) - V^(N)([s_t, b_t^(N)])        for i = N
+        
+        WARNING: May cause value collapse if V^(0) ≈ V^(1) (no reward signal for agent 0)
     
-    ACPPO Advantage:
-        A_t^(i) = Σ_{j=i}^{N} (γ'λ')^{j-i} ζ_t^(j) + Σ_{k=1}^{∞} Σ_{j=1}^{N} (γ'λ')^{kN+j-i} ζ_{t+k}^(j)
+    2. "shared_reward" - Standard GAE where all agents receive the same reward:
+        δ_t^(i) = r_t + γ V^(i)(s_{t+1}) - V^(i)(s_t)
+        A_t^(i) = Σ (γλ)^l δ_{t+l}^(i)
+        
+        This is more stable and recommended as default.
     """
     
     def __init__(
@@ -73,6 +79,7 @@ class MultiAgentRolloutBufferACPPO:
         lambda_prime: float = 0.95,
         device: torch.device = torch.device("cpu"),
         store_images: bool = False,
+        gae_mode: str = "shared_reward",  # "acppo_microstep" or "shared_reward"
     ):
         self.buffer_size = buffer_size
         self.num_agents = num_agents
@@ -92,6 +99,7 @@ class MultiAgentRolloutBufferACPPO:
         
         self.device = device
         self.store_images = store_images
+        self.gae_mode = gae_mode
         self.pos = 0
         self.full = False
         
@@ -195,22 +203,91 @@ class MultiAgentRolloutBufferACPPO:
         last_dones: np.ndarray,
     ):
         """
-        Compute per-agent returns and advantages using ACPPO microstep GAE.
+        Compute per-agent returns and advantages.
+        
+        Supports two modes via self.gae_mode:
+        
+        1. "shared_reward" (default, recommended):
+            Standard GAE where all agents receive the same reward.
+            δ_t^(i) = r_t + γ V^(i)(s_{t+1}) - V^(i)(s_t)
+            A_t^(i) = Σ (γλ)^l δ_{t+l}^(i)
+        
+        2. "acppo_microstep":
+            Original ACPPO microstep TD residuals.
+            WARNING: May cause value collapse if V^(0) ≈ V^(1)
+        
+        Args:
+            last_values: List of last values per agent [V^(0)(s_T+1), V^(1)(...)]
+            last_dones: Done flags for last step
+        """
+        if self.gae_mode == "shared_reward":
+            self._compute_shared_reward_gae(last_values, last_dones)
+        else:
+            self._compute_acppo_microstep_gae(last_values, last_dones)
+    
+    def _compute_shared_reward_gae(
+        self,
+        last_values: List[np.ndarray],
+        last_dones: np.ndarray,
+    ):
+        """
+        Compute GAE with shared reward for all agents.
+        
+        Each agent uses standard GAE:
+        δ_t^(i) = r_t + γ V^(i)(s_{t+1}) - V^(i)(s_t)
+        A_t^(i) = Σ (γλ)^l δ_{t+l}^(i)
+        
+        This is more stable than ACPPO microstep GAE.
+        """
+        N = self.num_agents
+        gamma = self.gamma
+        gae_lambda = self.gae_lambda
+        
+        for agent_idx in range(N):
+            last_gae_lam = np.zeros_like(last_dones)
+            
+            for step in reversed(range(self.buffer_size)):
+                if step == self.buffer_size - 1:
+                    next_non_terminal = 1.0 - last_dones
+                    next_value = last_values[agent_idx]
+                else:
+                    next_non_terminal = 1.0 - self.dones[step + 1]
+                    next_value = self.values[agent_idx][step + 1]
+                
+                # Standard TD residual: δ_t = r_t + γ V(s_{t+1}) - V(s_t)
+                delta = (
+                    self.rewards[step] + 
+                    gamma * next_value * next_non_terminal - 
+                    self.values[agent_idx][step]
+                )
+                
+                # GAE: A_t = δ_t + (γλ) A_{t+1}
+                self.advantages[agent_idx][step] = (
+                    delta + 
+                    gamma * gae_lambda * next_non_terminal * last_gae_lam
+                )
+                last_gae_lam = self.advantages[agent_idx][step]
+            
+            # Compute returns: R_t = A_t + V(s_t)
+            self.returns[agent_idx] = self.advantages[agent_idx] + self.values[agent_idx]
+    
+    def _compute_acppo_microstep_gae(
+        self,
+        last_values: List[np.ndarray],
+        last_dones: np.ndarray,
+    ):
+        """
+        Compute ACPPO microstep GAE (original formulation).
+        
+        WARNING: This may cause value collapse if V^(0) ≈ V^(1) because
+        Agent 0's TD residual doesn't include reward: ζ_t^(0) = γ' V^(1) - V^(0)
         
         ACPPO TD Residuals:
             For agent i < N:
                 ζ_t^(i) = γ' V^(i+1)([s_t, b_t^(i+1)]) - V^(i)([s_t, b_t^(i)])
             
             For agent N (last agent):
-                ζ_t^(N) = r_t + γ' V^(1)(s_{t+1}) - V^(N)([s_t, b_t^(N)])
-        
-        ACPPO Advantage (recursive form):
-            A_t^(i) = ζ_t^(i) + (γ'λ') A_t^(i+1)  for i < N
-            A_t^(N) = ζ_t^(N) + (γ'λ') A_{t+1}^(1) * (1 - done)
-        
-        Args:
-            last_values: List of last values per agent [V^(1)(s_T+1), V^(2)(...)]
-            last_dones: Done flags for last step
+                ζ_t^(N) = r_t + γ' V^(0)(s_{t+1}) - V^(N)([s_t, b_t^(N)])
         """
         N = self.num_agents
         gamma_prime = self.gamma_prime
@@ -235,7 +312,7 @@ class MultiAgentRolloutBufferACPPO:
             
             for i in reversed(range(N)):
                 if i == N - 1:
-                    # Last agent: ζ_t^(N) = r_t + γ' V^(1)(s_{t+1}) - V^(N)([s_t, b_t^(N)])
+                    # Last agent: ζ_t^(N) = r_t + γ' V^(0)(s_{t+1}) - V^(N)([s_t, b_t^(N)])
                     # Note: reward only comes at the last agent's step
                     td_residuals[i] = (
                         self.rewards[step] + 
@@ -255,7 +332,7 @@ class MultiAgentRolloutBufferACPPO:
             for i in reversed(range(N)):
                 if i == N - 1:
                     # Last agent: continues to next timestep's first agent
-                    # A_t^(N) = ζ_t^(N) + (γ'λ') * A_{t+1}^(1) * (1 - done)
+                    # A_t^(N) = ζ_t^(N) + (γ'λ') * A_{t+1}^(0) * (1 - done)
                     if step == self.buffer_size - 1:
                         # Bootstrap from stored GAE
                         next_gae = last_gae_lam[0]

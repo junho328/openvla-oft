@@ -164,9 +164,15 @@ class ACPPOConfig:
     use_global_state: bool = True
     
     # Per-agent value functions for ACPPO
-    # V^(1)(s_t) for agent 0
-    # V^(2)([s_t, b_t^(2)]) for agent 1, where b_t^(2) includes action dist from agent 0
+    # V^(0)(s_t) for agent 0
+    # V^(1)([s_t, b_t^(1)]) for agent 1, where b_t^(1) includes action dist from agent 0
     use_per_agent_value: bool = True
+    
+    # GAE computation mode:
+    # - "acppo_microstep": Original ACPPO with microstep TD residuals (may cause value collapse)
+    # - "shared_reward": Standard GAE where both agents receive the same reward
+    # Recommendation: Use "shared_reward" if value_loss converges to near-zero quickly
+    gae_mode: str = "acppo_microstep"
     
     #################################################################################################################
     # Logging and Checkpointing

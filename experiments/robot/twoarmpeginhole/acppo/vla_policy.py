@@ -167,6 +167,7 @@ class VLAAgentACPPO(nn.Module):
     - Supports extended proprio input (proprio + action_dist for agent 1)
     - Can estimate action distribution with front-view only input
     - Shared components across agents
+    - Per-agent value heads for proper ACPPO credit assignment
     """
     
     def __init__(
@@ -187,6 +188,7 @@ class VLAAgentACPPO(nn.Module):
         train_value_head: bool = True,
         value_head_hidden_dim: int = 512,
         value_head_num_layers: int = 2,
+        num_agents: int = 2,  # ACPPO: per-agent value heads
     ):
         super().__init__()
         
@@ -200,6 +202,7 @@ class VLAAgentACPPO(nn.Module):
         self.num_actions_chunk = num_actions_chunk
         self.total_action_dim = action_dim * num_actions_chunk
         self.device = device
+        self.num_agents = num_agents
         
         self.freeze_vla_backbone = freeze_vla_backbone
         self.train_proprio_projector = train_proprio_projector
@@ -208,11 +211,18 @@ class VLAAgentACPPO(nn.Module):
         
         llm_dim = vla_model.llm_dim if hasattr(vla_model, 'llm_dim') else 4096
         
-        self.value_head = ValueHead(
-            input_dim=llm_dim,
-            hidden_dim=value_head_hidden_dim,
-            num_layers=value_head_num_layers,
-        ).to(torch.bfloat16).to(device)
+        # ACPPO: Create per-agent value heads for proper credit assignment
+        # V^(0)(s_t) and V^(1)([s_t, b_t^(1)]) need different value functions
+        self.value_heads = nn.ModuleList([
+            ValueHead(
+                input_dim=llm_dim,
+                hidden_dim=value_head_hidden_dim,
+                num_layers=value_head_num_layers,
+            ).to(torch.bfloat16).to(device)
+            for _ in range(num_agents)
+        ])
+        # For backward compatibility
+        self.value_head = self.value_heads[0]
         
         self._setup_trainable_parameters()
         
@@ -238,8 +248,9 @@ class VLAAgentACPPO(nn.Module):
             for param in self.action_head.parameters():
                 param.requires_grad = self.train_action_head
         
-        if self.value_head is not None:
-            for param in self.value_head.parameters():
+        # ACPPO: Set trainable for all per-agent value heads
+        for value_head in self.value_heads:
+            for param in value_head.parameters():
                 param.requires_grad = self.train_value_head
     
     def _print_trainable_summary(self):
@@ -263,12 +274,14 @@ class VLAAgentACPPO(nn.Module):
             trainable_params += ah_trainable
             print_rank0(f"  Action head: {ah_trainable:,} / {ah_total:,} trainable")
         
-        if self.value_head is not None:
-            vh_total = sum(p.numel() for p in self.value_head.parameters())
-            vh_trainable = sum(p.numel() for p in self.value_head.parameters() if p.requires_grad)
-            total_params += vh_total
-            trainable_params += vh_trainable
-            print_rank0(f"  Value head: {vh_trainable:,} / {vh_total:,} trainable")
+        # ACPPO: Count all per-agent value heads
+        if self.value_heads is not None:
+            for i, vh in enumerate(self.value_heads):
+                vh_total = sum(p.numel() for p in vh.parameters())
+                vh_trainable = sum(p.numel() for p in vh.parameters() if p.requires_grad)
+                total_params += vh_total
+                trainable_params += vh_trainable
+                print_rank0(f"  Value head (agent {i}): {vh_trainable:,} / {vh_total:,} trainable")
         
         if self.proprio_projector is not None:
             pp_total = sum(p.numel() for p in self.proprio_projector.parameters())
@@ -295,8 +308,10 @@ class VLAAgentACPPO(nn.Module):
         if self.action_head is not None and self.train_action_head:
             params.extend([p for p in self.action_head.parameters() if p.requires_grad])
         
-        if self.value_head is not None and self.train_value_head:
-            params.extend([p for p in self.value_head.parameters() if p.requires_grad])
+        # ACPPO: Include all per-agent value heads
+        if self.value_heads is not None and self.train_value_head:
+            for vh in self.value_heads:
+                params.extend([p for p in vh.parameters() if p.requires_grad])
         
         if self.proprio_projector is not None and self.train_proprio_projector:
             params.extend([p for p in self.proprio_projector.parameters() if p.requires_grad])
@@ -455,12 +470,13 @@ class VLAAgentACPPO(nn.Module):
         proprio: Optional[torch.Tensor] = None,
         use_proprio: bool = True,
         use_film: bool = False,
+        agent_idx: int = 0,  # ACPPO: select per-agent value head
     ) -> torch.Tensor:
-        """Get state value from Value Head."""
+        """Get state value from per-agent Value Head."""
         text_hidden_states, num_patches = self.forward(
             inputs, proprio, use_proprio, use_film
         )
-        value = self.value_head(text_hidden_states)
+        value = self.value_heads[agent_idx](text_hidden_states)
         return value
     
     def get_action_and_value(
@@ -470,6 +486,7 @@ class VLAAgentACPPO(nn.Module):
         use_proprio: bool = True,
         use_film: bool = False,
         deterministic: bool = False,
+        agent_idx: int = 0,  # ACPPO: select per-agent value head
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Get action, log probability, entropy, value, action_mean, and action_std.
@@ -508,8 +525,8 @@ class VLAAgentACPPO(nn.Module):
         
         action = action.reshape(batch_size, self.num_actions_chunk, self.action_dim)
         
-        # Value Head
-        value = self.value_head(text_hidden_states)
+        # Value Head (per-agent for ACPPO)
+        value = self.value_heads[agent_idx](text_hidden_states)
         
         return action, log_prob, entropy, value, action_mean, action_std
     
@@ -520,6 +537,7 @@ class VLAAgentACPPO(nn.Module):
         proprio: Optional[torch.Tensor] = None,
         use_proprio: bool = True,
         use_film: bool = False,
+        agent_idx: int = 0,  # ACPPO: select per-agent value head
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate actions AND get value in one forward pass."""
         text_hidden_states, num_patches = self.forward(
@@ -545,7 +563,7 @@ class VLAAgentACPPO(nn.Module):
         log_prob = dist.log_prob(actions_flat).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1)
         
-        value = self.value_head(text_hidden_states)
+        value = self.value_heads[agent_idx](text_hidden_states)
         
         return log_prob, entropy, value
 
@@ -704,6 +722,7 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
         action_stds = []
         
         # === Agent 0: Standard forward pass ===
+        # Note: get_action_and_log_prob doesn't need agent_idx as it doesn't use value head
         action_0, log_prob_0, entropy_0, mu_0, sigma_0 = self.shared_agent.get_action_and_log_prob(
             inputs=agent_inputs[0],
             proprio=agent_proprios[0] if agent_proprios else None,
@@ -785,21 +804,22 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
         Get state values for all agents.
         
         For ACPPO:
-        - V^(1)(s_t) for agent 0
-        - V^(2)([s_t, b_t^(2)]) for agent 1, where b_t^(2) includes estimated action dist
+        - V^(0)(s_t) for agent 0 - uses value_heads[0]
+        - V^(1)([s_t, b_t^(1)]) for agent 1 - uses value_heads[1]
         """
         values = []
         
-        # Agent 0: V^(1)(s_t)
+        # Agent 0: V^(0)(s_t) - uses dedicated value head for agent 0
         value_0 = self.shared_agent.get_value(
             inputs=agent_inputs[0],
             proprio=agent_proprios[0] if agent_proprios else None,
             use_proprio=self.cfg.use_proprio,
             use_film=self.cfg.use_film,
+            agent_idx=0,  # ACPPO: use agent 0's value head
         )
         values.append(value_0)
         
-        # Agent 1: V^(2)([s_t, b_t^(2)])
+        # Agent 1: V^(1)([s_t, b_t^(1)]) - uses dedicated value head for agent 1
         if self.cfg.use_action_dist_input:
             # Get or estimate action distribution
             if estimated_action_dist is not None:
@@ -835,6 +855,7 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                 proprio=proprio_1_extended,
                 use_proprio=self.cfg.use_proprio,
                 use_film=self.cfg.use_film,
+                agent_idx=1,  # ACPPO: use agent 1's value head
             )
             
             self.shared_agent.proprio_projector = original_proprio_projector
@@ -844,6 +865,7 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                 proprio=agent_proprios[1] if agent_proprios else None,
                 use_proprio=self.cfg.use_proprio,
                 use_film=self.cfg.use_film,
+                agent_idx=1,  # ACPPO: use agent 1's value head
             )
         
         values.append(value_1)
@@ -871,13 +893,14 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
         action_means = []
         action_stds = []
         
-        # === Agent 0 ===
+        # === Agent 0 - uses value_heads[0] ===
         action_0, log_prob_0, entropy_0, value_0, mu_0, sigma_0 = self.shared_agent.get_action_and_value(
             inputs=agent_inputs[0],
             proprio=agent_proprios[0] if agent_proprios else None,
             use_proprio=self.cfg.use_proprio,
             use_film=self.cfg.use_film,
             deterministic=deterministic,
+            agent_idx=0,  # ACPPO: use agent 0's value head
         )
         
         actions.append(action_0)
@@ -887,7 +910,7 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
         action_means.append(mu_0)
         action_stds.append(sigma_0)
         
-        # === Agent 1 with chaining ===
+        # === Agent 1 with chaining - uses value_heads[1] ===
         if self.cfg.use_action_dist_input and front_view_only_input is not None:
             # Estimate Agent 0's action distribution
             mu_0_est, sigma_0_est = self.estimate_agent0_action_dist(
@@ -915,6 +938,7 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                 use_proprio=self.cfg.use_proprio,
                 use_film=self.cfg.use_film,
                 deterministic=deterministic,
+                agent_idx=1,  # ACPPO: use agent 1's value head
             )
             
             self.shared_agent.proprio_projector = original_proprio_projector
@@ -925,6 +949,7 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                 use_proprio=self.cfg.use_proprio,
                 use_film=self.cfg.use_film,
                 deterministic=deterministic,
+                agent_idx=1,  # ACPPO: use agent 1's value head
             )
         
         actions.append(action_1)
@@ -956,6 +981,7 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass for evaluating a single agent's actions.
+        Uses per-agent value heads for proper ACPPO credit assignment.
         """
         if agent_idx == 0:
             return self.shared_agent.evaluate_actions_and_value(
@@ -964,6 +990,7 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                 proprio=proprio,
                 use_proprio=self.cfg.use_proprio,
                 use_film=self.cfg.use_film,
+                agent_idx=0,  # ACPPO: use agent 0's value head
             )
         else:
             # Agent 1 with extended proprio
@@ -987,6 +1014,7 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                     proprio=proprio_extended,
                     use_proprio=self.cfg.use_proprio,
                     use_film=self.cfg.use_film,
+                    agent_idx=1,  # ACPPO: use agent 1's value head
                 )
                 
                 self.shared_agent.proprio_projector = original_proprio_projector
@@ -998,6 +1026,7 @@ class MultiAgentVLAPolicyACPPO(nn.Module):
                     proprio=proprio,
                     use_proprio=self.cfg.use_proprio,
                     use_film=self.cfg.use_film,
+                    agent_idx=1,  # ACPPO: use agent 1's value head
                 )
     
     def forward(

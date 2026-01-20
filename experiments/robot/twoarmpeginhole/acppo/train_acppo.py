@@ -177,6 +177,7 @@ class ACPPOTrainer:
             lambda_prime=cfg.lambda_prime,
             device=self.device,
             store_images=True,
+            gae_mode=cfg.gae_mode,  # "shared_reward" (default) or "acppo_microstep"
         )
         
         self.reward_wrapper = SharedRewardWrapper(
@@ -773,6 +774,26 @@ class ACPPOTrainer:
         for agent_idx in range(TWOARM_ACPPO_CONSTANTS["NUM_AGENTS"]):
             stats[f"update/agent{agent_idx}_policy_loss"] = np.mean(agent_policy_losses[agent_idx])
             stats[f"update/agent{agent_idx}_value_loss"] = np.mean(agent_value_losses[agent_idx])
+        
+        # ACPPO diagnostic stats: value/advantage distributions
+        # This helps debug value function learning and microstep GAE issues
+        for agent_idx in range(TWOARM_ACPPO_CONSTANTS["NUM_AGENTS"]):
+            flat_values = self.buffer.values[agent_idx].flatten()
+            flat_returns = self.buffer.returns[agent_idx].flatten()
+            flat_advantages = self.buffer.advantages[agent_idx].flatten()
+            
+            stats[f"debug/agent{agent_idx}_value_mean"] = np.mean(flat_values)
+            stats[f"debug/agent{agent_idx}_value_std"] = np.std(flat_values)
+            stats[f"debug/agent{agent_idx}_return_mean"] = np.mean(flat_returns)
+            stats[f"debug/agent{agent_idx}_return_std"] = np.std(flat_returns)
+            stats[f"debug/agent{agent_idx}_advantage_mean"] = np.mean(flat_advantages)
+            stats[f"debug/agent{agent_idx}_advantage_std"] = np.std(flat_advantages)
+        
+        # Value head difference diagnostic (for ACPPO microstep GAE)
+        # If V[0] ≈ V[1], Agent 0's TD residual will be near zero
+        v0_mean = np.mean(self.buffer.values[0].flatten())
+        v1_mean = np.mean(self.buffer.values[1].flatten())
+        stats["debug/value_head_diff"] = abs(v1_mean - v0_mean)
         
         return self._average_stats(stats)
     

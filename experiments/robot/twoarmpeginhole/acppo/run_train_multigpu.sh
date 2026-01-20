@@ -66,7 +66,7 @@ CRITIC_LR=5e-4
 # ACPPO specific parameters
 GAMMA_PRIME=0.99
 LAMBDA_PRIME=0.95
-NUM_ACTIONS_CHUNK=2  # ACPPO uses chunk size 4 (vs MAPPO's 2)
+NUM_ACTIONS_CHUNK=1 
 
 # Environment settings
 REWARD_SHAPING=true
@@ -77,7 +77,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR/../../../.."
 
 # Setup environment
-export WANDB_MODE=online
+export WANDB_MODE=offline
 export OMP_NUM_THREADS=4
 
 # NCCL settings for optimal performance
@@ -127,9 +127,9 @@ TRAIN_ARGS=(
     --gamma_prime $GAMMA_PRIME
     --lambda_prime $LAMBDA_PRIME
     --reward_shaping $REWARD_SHAPING
-    --reaching_weight 0.4
+    --reaching_weight 1.0
     --perpendicular_weight 1.0
-    --parallel_weight 0.6
+    --parallel_weight 1.0
     --alignment_weight 1.0
     --max_episode_steps $MAX_EPISODE_STEPS
     --use_wandb true
@@ -140,11 +140,11 @@ TRAIN_ARGS=(
     --save_eval_videos true
     --num_eval_videos 2
     --eval_freq 50
-    --save_freq 50
+    --save_freq 100
     --history_length 2
     --num_actions_chunk $NUM_ACTIONS_CHUNK
     --seed 42
-    --run_id_note "multigpu_${NUM_GPUS}gpus"
+    --run_id_note "seperate_value_heads"
     # ACPPO specific
     --use_action_dist_input true
     --detach_action_dist_grad true
