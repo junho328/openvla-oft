@@ -44,11 +44,33 @@ BRIDGE_CONSTANTS = {
     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
 }
 
+# TwoArmPegInHole constants (for MAPPO training)
+# ACTION_DIM=6 because TwoArm has no gripper (6-DoF only)
+TWOARM_CONSTANTS = {
+    "NUM_ACTIONS_CHUNK": 2,   # Reduced chunk size for RL (faster iteration)
+    "ACTION_DIM": 6,          # 6-DoF per arm (no gripper, different from LIBERO=7)
+    "PROPRIO_DIM": 8,         # EEF pos (3) + axis-angle (3) + padding (2)
+    "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
+}
+
+# TwoArmPegInHole constants for ACPPO training (larger action chunks)
+TWOARM_ACPPO_CONSTANTS = {
+    "NUM_ACTIONS_CHUNK": 2,   # Larger chunk size for ACPPO
+    "ACTION_DIM": 6,          # 6-DoF per arm (no gripper)
+    "PROPRIO_DIM": 8,         # EEF pos (3) + axis-angle (3) + padding (2)
+    "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
+}
+
 # Function to detect robot platform from command line arguments
 def detect_robot_platform():
     cmd_args = " ".join(sys.argv).lower()
 
-    if "libero" in cmd_args:
+    # Check ACPPO first (more specific than TWOARM)
+    if "acppo" in cmd_args:
+        return "TWOARM_ACPPO"
+    elif "twoarm" in cmd_args or "mappo" in cmd_args or "two_arm" in cmd_args:
+        return "TWOARM"
+    elif "libero" in cmd_args:
         return "LIBERO"
     elif "aloha" in cmd_args:
         return "ALOHA"
@@ -63,7 +85,11 @@ def detect_robot_platform():
 ROBOT_PLATFORM = detect_robot_platform()
 
 # Set the appropriate constants based on the detected platform
-if ROBOT_PLATFORM == "LIBERO":
+if ROBOT_PLATFORM == "TWOARM_ACPPO":
+    constants = TWOARM_ACPPO_CONSTANTS
+elif ROBOT_PLATFORM == "TWOARM":
+    constants = TWOARM_CONSTANTS
+elif ROBOT_PLATFORM == "LIBERO":
     constants = LIBERO_CONSTANTS
 elif ROBOT_PLATFORM == "ALOHA":
     constants = ALOHA_CONSTANTS

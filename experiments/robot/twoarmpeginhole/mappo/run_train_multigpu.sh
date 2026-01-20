@@ -1,13 +1,8 @@
 #!/bin/bash
-# Multi-GPU ACPPO Training Script for TwoArmPegInHole Environment
+# Multi-GPU MAPPO Training Script for TwoArmPegInHole Environment
 #
-# This script launches distributed ACPPO training using PyTorch DDP (DistributedDataParallel).
+# This script launches distributed MAPPO training using PyTorch DDP (DistributedDataParallel).
 # Each GPU runs its own environment instance with different random seeds for diverse experience collection.
-#
-# ACPPO extends MAPPO with:
-# - Agent chaining: Agent 1 estimates Agent 0's action distribution as additional input
-# - Microstep-based GAE for proper credit assignment
-# - Per-agent value functions
 #
 # Usage:
 #   ./run_train_multigpu.sh [NUM_GPUS] [pretrained_checkpoint_path] [resume_checkpoint_path]
@@ -49,10 +44,10 @@ fi
 
 # Default configuration
 WANDB_ENTITY="acpo"
-WANDB_PROJECT="acppo-twoarm-multigpu"
+WANDB_PROJECT="mappo-twoarm-multigpu"
 
 # Output directory
-RUN_ROOT_DIR="${RUN_ROOT_DIR:-/home/work/aipr-jhna/output/twoarmpeginhole/acppo}"
+RUN_ROOT_DIR="${RUN_ROOT_DIR:-/home/work/aipr-jhna/output/twoarmpeginhole/mappo}"
 
 # Training hyperparameters (adjusted for multi-GPU)
 # Note: Effective batch size = BATCH_SIZE * NUM_GPUS
@@ -63,14 +58,9 @@ LEARNING_RATE=3e-4
 ACTOR_LR=1e-4
 CRITIC_LR=5e-4
 
-# ACPPO specific parameters
-GAMMA_PRIME=0.99
-LAMBDA_PRIME=0.95
-NUM_ACTIONS_CHUNK=2  # ACPPO uses chunk size 4 (vs MAPPO's 2)
-
 # Environment settings
 REWARD_SHAPING=true
-MAX_EPISODE_STEPS=400
+MAX_EPISODE_STEPS=300
 
 # Navigate to project root
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -93,7 +83,7 @@ export NCCL_P2P_DISABLE=0  # Enable peer-to-peer (set to 1 if issues occur)
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 echo "=============================================="
-echo "Multi-GPU ACPPO Training (DDP)"
+echo "Multi-GPU MAPPO Training (DDP)"
 echo "=============================================="
 echo "Timestamp: $TIMESTAMP"
 echo "Pretrained checkpoint: $PRETRAINED_CHECKPOINT"
@@ -102,9 +92,6 @@ echo "Number of GPUs: $NUM_GPUS"
 echo "Total timesteps: $TOTAL_TIMESTEPS"
 echo "Steps per rollout (per GPU): $NUM_STEPS_PER_ROLLOUT"
 echo "Effective rollout steps: $((NUM_STEPS_PER_ROLLOUT * NUM_GPUS))"
-echo "Action chunk size: $NUM_ACTIONS_CHUNK"
-echo "ACPPO gamma_prime: $GAMMA_PRIME"
-echo "ACPPO lambda_prime: $LAMBDA_PRIME"
 echo "=============================================="
 echo ""
 
@@ -124,13 +111,11 @@ TRAIN_ARGS=(
     --learning_rate $LEARNING_RATE
     --actor_lr $ACTOR_LR
     --critic_lr $CRITIC_LR
-    --gamma_prime $GAMMA_PRIME
-    --lambda_prime $LAMBDA_PRIME
     --reward_shaping $REWARD_SHAPING
     --reaching_weight 0.4
-    --perpendicular_weight 1.0
+    --perpendicular_weight 1.2
     --parallel_weight 0.6
-    --alignment_weight 1.0
+    --alignment_weight 1.2
     --max_episode_steps $MAX_EPISODE_STEPS
     --use_wandb true
     --wandb_entity "$WANDB_ENTITY"
@@ -139,16 +124,12 @@ TRAIN_ARGS=(
     --use_l1_regression true
     --save_eval_videos true
     --num_eval_videos 2
-    --eval_freq 50
-    --save_freq 50
+    --eval_freq 100
+    --save_freq 100
     --history_length 2
-    --num_actions_chunk $NUM_ACTIONS_CHUNK
+    --num_actions_chunk 2
     --seed 42
     --run_id_note "multigpu_${NUM_GPUS}gpus"
-    # ACPPO specific
-    --use_action_dist_input true
-    --detach_action_dist_grad true
-    --use_per_agent_value true
 )
 
 # Add resume checkpoint if provided
@@ -171,7 +152,7 @@ nohup torchrun \
     --nproc_per_node=$NUM_GPUS \
     --rdzv_backend=c10d \
     --rdzv_endpoint=localhost:29500 \
-    -m experiments.robot.twoarmpeginhole.acppo.train_acppo \
+    -m experiments.robot.twoarmpeginhole.mappo.train_mappo \
     "${TRAIN_ARGS[@]}" > "$LOG_FILE" 2>&1 &
 # torchrun \
 #     --standalone \
@@ -179,7 +160,7 @@ nohup torchrun \
 #     --nproc_per_node=$NUM_GPUS \
 #     --rdzv_backend=c10d \
 #     --rdzv_endpoint=localhost:29500 \
-#     -m experiments.robot.twoarmpeginhole.acppo.train_acppo \
+#     -m experiments.robot.twoarmpeginhole.mappo.train_mappo \
 #     "${TRAIN_ARGS[@]}"
 
 PID=$!

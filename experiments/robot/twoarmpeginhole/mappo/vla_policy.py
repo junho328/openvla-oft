@@ -11,14 +11,29 @@ Architecture:
 Both heads share the same VLA hidden states, making training efficient.
 """
 
+import os
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from torch.distributions import Normal
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
 from .config import MAPPOConfig, TWOARM_MAPPO_CONSTANTS
+
+
+def is_main_process():
+    """Check if current process is main (rank 0)."""
+    if not dist.is_available() or not dist.is_initialized():
+        return True
+    return dist.get_rank() == 0
+
+
+def print_rank0(*args, **kwargs):
+    """Print only on rank 0."""
+    if is_main_process():
+        print(*args, **kwargs)
 
 
 class ValueHead(nn.Module):
@@ -186,10 +201,10 @@ class VLAAgent(nn.Module):
             num_layers=value_head_num_layers,
         ).to(torch.bfloat16).to(device)
         
-        print(f"\nCreated Value Head on top of VLA backbone:")
-        print(f"  Input dim: {llm_dim}")
-        print(f"  Hidden dim: {value_head_hidden_dim}")
-        print(f"  Num layers: {value_head_num_layers}")
+        print_rank0(f"\nCreated Value Head on top of VLA backbone:")
+        print_rank0(f"  Input dim: {llm_dim}")
+        print_rank0(f"  Hidden dim: {value_head_hidden_dim}")
+        print_rank0(f"  Num layers: {value_head_num_layers}")
         
         # Apply freeze settings
         self._setup_trainable_parameters()
@@ -211,45 +226,45 @@ class VLAAgent(nn.Module):
         """Setup which parameters are trainable based on config."""
         # Freeze/unfreeze VLA backbone
         if self.freeze_vla_backbone:
-            print("Freezing VLA backbone...")
+            print_rank0("Freezing VLA backbone...")
             for param in self.vla.parameters():
                 param.requires_grad = False
             # Count frozen params
             frozen_params = sum(p.numel() for p in self.vla.parameters())
-            print(f"  Frozen VLA parameters: {frozen_params:,}")
+            print_rank0(f"  Frozen VLA parameters: {frozen_params:,}")
         else:
-            print("VLA backbone is trainable")
+            print_rank0("VLA backbone is trainable")
         
         # Freeze/unfreeze proprio projector
         if self.proprio_projector is not None:
             if self.train_proprio_projector:
-                print("Proprio projector is trainable")
+                print_rank0("Proprio projector is trainable")
                 for param in self.proprio_projector.parameters():
                     param.requires_grad = True
             else:
-                print("Freezing proprio projector...")
+                print_rank0("Freezing proprio projector...")
                 for param in self.proprio_projector.parameters():
                     param.requires_grad = False
         
         # Freeze/unfreeze action head
         if self.action_head is not None:
             if self.train_action_head:
-                print("Action head is trainable")
+                print_rank0("Action head is trainable")
                 for param in self.action_head.parameters():
                     param.requires_grad = True
             else:
-                print("Freezing action head...")
+                print_rank0("Freezing action head...")
                 for param in self.action_head.parameters():
                     param.requires_grad = False
         
         # Freeze/unfreeze value head
         if self.value_head is not None:
             if self.train_value_head:
-                print("Value head is trainable")
+                print_rank0("Value head is trainable")
                 for param in self.value_head.parameters():
                     param.requires_grad = True
             else:
-                print("Freezing value head...")
+                print_rank0("Freezing value head...")
                 for param in self.value_head.parameters():
                     param.requires_grad = False
     
@@ -258,16 +273,16 @@ class VLAAgent(nn.Module):
         total_params = 0
         trainable_params = 0
         
-        print("\n" + "-"*50)
-        print("Trainable Parameters Summary:")
-        print("-"*50)
+        print_rank0("\n" + "-"*50)
+        print_rank0("Trainable Parameters Summary:")
+        print_rank0("-"*50)
         
         # VLA backbone
         vla_total = sum(p.numel() for p in self.vla.parameters())
         vla_trainable = sum(p.numel() for p in self.vla.parameters() if p.requires_grad)
         total_params += vla_total
         trainable_params += vla_trainable
-        print(f"  VLA backbone: {vla_trainable:,} / {vla_total:,} trainable")
+        print_rank0(f"  VLA backbone: {vla_trainable:,} / {vla_total:,} trainable")
         
         # Action head
         if self.action_head is not None:
@@ -275,7 +290,7 @@ class VLAAgent(nn.Module):
             ah_trainable = sum(p.numel() for p in self.action_head.parameters() if p.requires_grad)
             total_params += ah_total
             trainable_params += ah_trainable
-            print(f"  Action head: {ah_trainable:,} / {ah_total:,} trainable")
+            print_rank0(f"  Action head: {ah_trainable:,} / {ah_total:,} trainable")
         
         # Value head
         if self.value_head is not None:
@@ -283,7 +298,7 @@ class VLAAgent(nn.Module):
             vh_trainable = sum(p.numel() for p in self.value_head.parameters() if p.requires_grad)
             total_params += vh_total
             trainable_params += vh_trainable
-            print(f"  Value head: {vh_trainable:,} / {vh_total:,} trainable")
+            print_rank0(f"  Value head: {vh_trainable:,} / {vh_total:,} trainable")
         
         # Proprio projector
         if self.proprio_projector is not None:
@@ -291,18 +306,18 @@ class VLAAgent(nn.Module):
             pp_trainable = sum(p.numel() for p in self.proprio_projector.parameters() if p.requires_grad)
             total_params += pp_total
             trainable_params += pp_trainable
-            print(f"  Proprio projector: {pp_trainable:,} / {pp_total:,} trainable")
+            print_rank0(f"  Proprio projector: {pp_trainable:,} / {pp_total:,} trainable")
         
         # log_std (always trainable for RL exploration)
         log_std_params = self.total_action_dim
         trainable_params += log_std_params
         total_params += log_std_params
-        print(f"  Log std: {log_std_params:,} trainable")
+        print_rank0(f"  Log std: {log_std_params:,} trainable")
         
-        print("-"*50)
-        print(f"  TOTAL: {trainable_params:,} / {total_params:,} trainable parameters")
-        print(f"  Trainable ratio: {100 * trainable_params / total_params:.2f}%")
-        print("-"*50 + "\n")
+        print_rank0("-"*50)
+        print_rank0(f"  TOTAL: {trainable_params:,} / {total_params:,} trainable parameters")
+        print_rank0(f"  Trainable ratio: {100 * trainable_params / total_params:.2f}%")
+        print_rank0("-"*50 + "\n")
     
     def get_trainable_parameters(self) -> List[nn.Parameter]:
         """
@@ -480,11 +495,15 @@ class VLAAgent(nn.Module):
         else:
             action = dist.rsample()  # Reparameterized sample for gradient flow
         
-        # Compute log probability
+        # Compute log probability (before clipping for correct gradient)
         log_prob = dist.log_prob(action).sum(dim=-1)
         
         # Compute entropy
         entropy = dist.entropy().sum(dim=-1)
+        
+        # Clip action to [-1, 1] range to ensure valid normalized actions
+        # This prevents out-of-bound actions when unnormalizing
+        action = torch.clamp(action, -1.0, 1.0)
         
         # Reshape action to (B, chunk_len, action_dim)
         action = action.reshape(batch_size, self.num_actions_chunk, self.action_dim)
@@ -624,8 +643,12 @@ class VLAAgent(nn.Module):
         else:
             action = dist.rsample()
         
+        # Compute log probability (before clipping for correct gradient)
         log_prob = dist.log_prob(action).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1)
+        
+        # Clip action to [-1, 1] range to ensure valid normalized actions
+        action = torch.clamp(action, -1.0, 1.0)
         
         # Reshape action
         action = action.reshape(batch_size, self.num_actions_chunk, self.action_dim)
@@ -729,14 +752,14 @@ class MultiAgentVLAPolicy(nn.Module):
         self.share_policy = cfg.share_policy
         self.device = device
         
-        print("\n" + "="*60)
-        print("Initializing Multi-Agent VLA Policy for MAPPO")
-        print("="*60)
-        print(f"  VLA backbone frozen: {cfg.freeze_vla_backbone}")
-        print(f"  Train action head: {cfg.train_action_head}")
-        print(f"  Train proprio projector: {cfg.train_proprio_projector}")
-        print(f"  Shared policy: {cfg.share_policy}")
-        print("="*60 + "\n")
+        print_rank0("\n" + "="*60)
+        print_rank0("Initializing Multi-Agent VLA Policy for MAPPO")
+        print_rank0("="*60)
+        print_rank0(f"  VLA backbone frozen: {cfg.freeze_vla_backbone}")
+        print_rank0(f"  Train action head: {cfg.train_action_head}")
+        print_rank0(f"  Train proprio projector: {cfg.train_proprio_projector}")
+        print_rank0(f"  Shared policy: {cfg.share_policy}")
+        print_rank0("="*60 + "\n")
         
         if self.share_policy:
             # Create single shared agent with both Action Head and Value Head
@@ -996,6 +1019,64 @@ class MultiAgentVLAPolicy(nn.Module):
                 params.extend(agent.get_trainable_parameters())
         
         return params
+    
+    def forward_evaluate_agent(
+        self,
+        agent_idx: int,
+        inputs: Dict[str, torch.Tensor],
+        actions: torch.Tensor,
+        proprio: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass for evaluating a single agent's actions.
+        
+        IMPORTANT: This method should be called through the DDP wrapper to ensure
+        proper gradient synchronization across GPUs. Do NOT call this on .module directly.
+        
+        Args:
+            agent_idx: Index of the agent to evaluate
+            inputs: Processed VLA inputs
+            actions: Actions to evaluate (B, chunk_len, action_dim)
+            proprio: Proprioceptive state
+            
+        Returns:
+            Tuple of (log_prob, entropy, value)
+        """
+        return self.agents[agent_idx].evaluate_actions_and_value(
+            inputs=inputs,
+            actions=actions,
+            proprio=proprio,
+            use_proprio=self.cfg.use_proprio,
+            use_film=self.cfg.use_film,
+        )
+    
+    def forward(
+        self,
+        mode: str,
+        **kwargs,
+    ):
+        """
+        Generic forward method for DDP compatibility.
+        
+        DDP requires all forward passes to go through the wrapper for proper
+        gradient synchronization. This method routes to appropriate sub-methods.
+        
+        Args:
+            mode: One of 'evaluate_agent', 'get_actions', 'get_values', etc.
+            **kwargs: Arguments passed to the sub-method
+        
+        Returns:
+            Output from the sub-method
+        """
+        if mode == 'evaluate_agent':
+            return self.forward_evaluate_agent(
+                agent_idx=kwargs['agent_idx'],
+                inputs=kwargs['inputs'],
+                actions=kwargs['actions'],
+                proprio=kwargs.get('proprio'),
+            )
+        else:
+            raise ValueError(f"Unknown forward mode: {mode}")
 
 
 def _is_finetuned_checkpoint(checkpoint_path: str) -> bool:
@@ -1063,21 +1144,33 @@ def load_vla_for_mappo(
     from prismatic.models.projectors import ProprioProjector
     from prismatic.models.action_heads import L1RegressionActionHead, DiffusionActionHead
     
-    print("Loading VLA model for MAPPO training...")
+    print_rank0("Loading VLA model for MAPPO training...")
     
     # Check if this is a fine-tuned checkpoint
     is_finetuned = _is_finetuned_checkpoint(cfg.pretrained_checkpoint)
     
     if is_finetuned:
-        print(f"  Detected FINE-TUNED checkpoint: {cfg.pretrained_checkpoint}")
-        print("  Will LOAD proprio_projector and action_head from checkpoint")
+        print_rank0(f"  Detected FINE-TUNED checkpoint: {cfg.pretrained_checkpoint}")
+        print_rank0("  Will LOAD proprio_projector and action_head from checkpoint")
     else:
-        print(f"  Detected BASE VLA checkpoint: {cfg.pretrained_checkpoint}")
-        print("  Will INITIALIZE proprio_projector and action_head from scratch")
+        print_rank0(f"  Detected BASE VLA checkpoint: {cfg.pretrained_checkpoint}")
+        print_rank0("  Will INITIALIZE proprio_projector and action_head from scratch")
     
     # Load base VLA model
+    # Note: get_vla() now uses get_current_device() which respects torch.cuda.set_device()
+    # so the model will be loaded to the correct GPU for each DDP rank
     vla = get_model(cfg)
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
+    
+    # Ensure model is on the correct device (should already be, but explicit is better)
+    vla = vla.to(device)
+    
+    # Clear any temporary memory
+    torch.cuda.empty_cache()
+    
+    # Synchronize all processes after model loading
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
     
     # Get processor
     processor = get_processor(cfg)
@@ -1086,14 +1179,14 @@ def load_vla_for_mappo(
     # These are needed to unnormalize action outputs before sending to environment
     norm_stats = getattr(vla, 'norm_stats', None)
     if norm_stats is not None:
-        print("Loaded action normalization statistics from VLA model")
+        print_rank0("Loaded action normalization statistics from VLA model")
         # Get the first key if multiple datasets
         if len(norm_stats) > 0:
             first_key = list(norm_stats.keys())[0]
-            print(f"  Using normalization key: {first_key}")
+            print_rank0(f"  Using normalization key: {first_key}")
     else:
-        print("WARNING: No normalization statistics found in VLA model!")
-        print("  Actions will NOT be unnormalized before environment execution.")
+        print_rank0("WARNING: No normalization statistics found in VLA model!")
+        print_rank0("  Actions will NOT be unnormalized before environment execution.")
     
     # Load or initialize proprio projector
     proprio_projector = None
@@ -1101,52 +1194,51 @@ def load_vla_for_mappo(
         if is_finetuned:
             # Load from fine-tuned checkpoint
             from experiments.robot.openvla_utils import get_proprio_projector
-            print("Loading proprio projector from fine-tuned checkpoint...")
+            print_rank0("Loading proprio projector from fine-tuned checkpoint...")
             proprio_projector = get_proprio_projector(
                 cfg,
                 vla.llm_dim,
                 proprio_dim=TWOARM_MAPPO_CONSTANTS["PROPRIO_DIM"],
             )
-            print(f"  Loaded proprio projector: input_dim={TWOARM_MAPPO_CONSTANTS['PROPRIO_DIM']}, output_dim={vla.llm_dim}")
+            print_rank0(f"  Loaded proprio projector: input_dim={TWOARM_MAPPO_CONSTANTS['PROPRIO_DIM']}, output_dim={vla.llm_dim}")
         else:
             # Initialize fresh for base VLA
-            print("Initializing NEW proprio projector (base VLA has no proprio_projector)")
+            print_rank0("Initializing NEW proprio projector (base VLA has no proprio_projector)")
             proprio_projector = ProprioProjector(
                 llm_dim=vla.llm_dim,
                 proprio_dim=TWOARM_MAPPO_CONSTANTS["PROPRIO_DIM"],
             )
             proprio_projector = proprio_projector.to(torch.bfloat16).to(device)
-            print(f"  Initialized proprio projector: input_dim={TWOARM_MAPPO_CONSTANTS['PROPRIO_DIM']}, output_dim={vla.llm_dim}")
+            print_rank0(f"  Initialized proprio projector: input_dim={TWOARM_MAPPO_CONSTANTS['PROPRIO_DIM']}, output_dim={vla.llm_dim}")
     
     # Initialize action head (ALWAYS new - ACTION_DIM differs: LIBERO=7, TwoArm=6)
     # Even with fine-tuned checkpoint, we cannot load action_head due to dimension mismatch
     action_head = None
     if cfg.use_l1_regression:
-        print("Initializing NEW L1 regression action head (ACTION_DIM mismatch with LIBERO)")
-        print(f"  NOTE: LIBERO ACTION_DIM=7, TwoArm ACTION_DIM={TWOARM_MAPPO_CONSTANTS['ACTION_DIM']}")
+        print_rank0(f"Initializing L1 regression action head (action_dim={cfg.action_dim}, num_actions_chunk={cfg.num_actions_chunk})")
         action_head = L1RegressionActionHead(
             input_dim=vla.llm_dim,
             hidden_dim=vla.llm_dim,
-            action_dim=TWOARM_MAPPO_CONSTANTS["ACTION_DIM"],
+            action_dim=cfg.action_dim,
+            num_actions_chunk=cfg.num_actions_chunk,
         )
         action_head = action_head.to(torch.bfloat16).to(device)
-        print(f"  Initialized action head: hidden_dim={vla.llm_dim}, action_dim={TWOARM_MAPPO_CONSTANTS['ACTION_DIM']}")
     elif cfg.use_diffusion:
-        print("Initializing NEW diffusion action head (ACTION_DIM mismatch with LIBERO)")
+        print_rank0(f"Initializing diffusion action head (action_dim={cfg.action_dim}, num_actions_chunk={cfg.num_actions_chunk})")
         action_head = DiffusionActionHead(
             input_dim=vla.llm_dim,
             hidden_dim=vla.llm_dim,
-            action_dim=TWOARM_MAPPO_CONSTANTS["ACTION_DIM"],
+            action_dim=cfg.action_dim,
             num_diffusion_steps_train=cfg.num_diffusion_steps_train,
+            num_actions_chunk=cfg.num_actions_chunk,
         )
         action_head = action_head.to(torch.bfloat16).to(device)
-        print(f"  Initialized diffusion action head: action_dim={TWOARM_MAPPO_CONSTANTS['ACTION_DIM']}")
     
     # Noisy action projector (only for diffusion, always initialize new)
     noisy_action_projector = None
     if cfg.use_diffusion:
         from prismatic.models.projectors import NoisyActionProjector
-        print("Initializing NEW noisy action projector")
+        print_rank0("Initializing NEW noisy action projector")
         noisy_action_projector = NoisyActionProjector(llm_dim=vla.llm_dim)
         noisy_action_projector = noisy_action_projector.to(torch.bfloat16).to(device)
     

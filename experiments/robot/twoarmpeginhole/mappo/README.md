@@ -32,15 +32,16 @@
 
 ```
 mappo/
-├── __init__.py           # 모듈 초기화
-├── config.py             # MAPPO 설정 및 상수
-├── observation_utils.py  # 관측 히스토리 관리
-├── vla_policy.py         # Multi-Agent VLA 정책
-├── value_network.py      # 중앙집중식 Value Network
-├── rollout_buffer.py     # 경험 버퍼
-├── train_mappo.py        # 메인 훈련 스크립트
-├── run_train.sh          # 훈련 실행 쉘 스크립트
-└── README.md             # 이 문서
+├── __init__.py              # 모듈 초기화
+├── config.py                # MAPPO 설정 및 상수
+├── observation_utils.py     # 관측 히스토리 관리
+├── vla_policy.py            # Multi-Agent VLA 정책
+├── value_network.py         # 중앙집중식 Value Network
+├── rollout_buffer.py        # 경험 버퍼
+├── train_mappo.py           # 메인 훈련 스크립트
+├── run_train.sh             # 훈련 실행 쉘 스크립트 (Single/Multi-GPU)
+├── run_train_multigpu.sh    # Multi-GPU 전용 훈련 스크립트
+└── README.md                # 이 문서
 ```
 
 ## 설치
@@ -73,7 +74,7 @@ pip install tensorboard
    openvla/openvla-7b
    ```
 
-### 기본 훈련
+### Single-GPU 훈련
 
 ```bash
 cd /path/to/openvla-oft
@@ -82,7 +83,7 @@ cd /path/to/openvla-oft
 ./experiments/robot/twoarmpeginhole/mappo/run_train.sh
 
 # 또는 특정 checkpoint 지정
-./experiments/robot/twoarmpeginhole/mappo/run_train.sh moojink/openvla-7b-oft-finetuned-libero-10
+./experiments/robot/twoarmpeginhole/mappo/run_train.sh /path/to/checkpoint
 
 # 방법 2: Python 직접 실행
 python -m experiments.robot.twoarmpeginhole.mappo.train_mappo \
@@ -90,6 +91,52 @@ python -m experiments.robot.twoarmpeginhole.mappo.train_mappo \
     --total_timesteps 1000000 \
     --use_wandb true
 ```
+
+### Multi-GPU 훈련 (DDP)
+
+PyTorch DistributedDataParallel (DDP)를 사용하여 여러 GPU에서 병렬 훈련을 수행합니다.
+각 GPU는 독립적인 환경 인스턴스를 실행하여 다양한 경험을 수집합니다.
+
+```bash
+cd /path/to/openvla-oft
+
+# 방법 1: run_train.sh에 --multi-gpu 플래그 사용
+# 모든 사용 가능한 GPU 사용
+./experiments/robot/twoarmpeginhole/mappo/run_train.sh /path/to/checkpoint --multi-gpu
+
+# 특정 개수의 GPU 사용 (예: 4개)
+./experiments/robot/twoarmpeginhole/mappo/run_train.sh /path/to/checkpoint --multi-gpu 4
+
+# 방법 2: Multi-GPU 전용 스크립트 사용
+# 모든 사용 가능한 GPU 사용
+./experiments/robot/twoarmpeginhole/mappo/run_train_multigpu.sh
+
+# 특정 개수의 GPU와 checkpoint 지정
+./experiments/robot/twoarmpeginhole/mappo/run_train_multigpu.sh 4 /path/to/checkpoint
+
+# 방법 3: torchrun 직접 사용
+torchrun --standalone --nnodes=1 --nproc_per_node=4 \
+    -m experiments.robot.twoarmpeginhole.mappo.train_mappo \
+    --pretrained_checkpoint /path/to/checkpoint \
+    --total_timesteps 1000000
+```
+
+#### Multi-GPU 설정 옵션
+
+```bash
+# 특정 GPU만 사용 (예: GPU 0, 1, 2, 3)
+CUDA_VISIBLE_DEVICES=0,1,2,3 ./run_train_multigpu.sh 4
+
+# 출력 디렉토리 지정
+RUN_ROOT_DIR=/data/mappo_outputs ./run_train_multigpu.sh
+```
+
+#### Multi-GPU 훈련의 장점
+
+1. **더 빠른 경험 수집**: 각 GPU가 독립적인 환경에서 rollout 수집
+2. **다양한 경험**: Rank별로 다른 시드로 다양한 환경 상태 탐색
+3. **더 큰 유효 배치 크기**: `effective_batch = batch_size × num_gpus`
+4. **자동 그래디언트 동기화**: DDP가 backward pass 시 자동 동기화
 
 ### 주요 설정 옵션
 
@@ -229,6 +276,43 @@ class CentralizedValueNetwork(nn.Module):
 - `entropy_coef` 증가 (탐색 장려)
 - `clip_epsilon` 조정
 - `learning_rate` 감소
+
+### Multi-GPU 관련 문제
+
+#### NCCL 통신 오류
+```bash
+# InfiniBand 비활성화 (일반 서버의 경우)
+export NCCL_IB_DISABLE=1
+
+# P2P 통신 비활성화 (일부 시스템에서 필요)
+export NCCL_P2P_DISABLE=1
+
+# 디버그 모드로 상세 로그 확인
+export NCCL_DEBUG=INFO
+```
+
+#### GPU 메모리 불균형
+- 각 GPU의 VRAM 사용량 확인: `nvidia-smi`
+- Rank 0에서 모델 로딩 시 더 많은 메모리 사용할 수 있음
+- 모든 GPU가 동일한 VRAM을 가지는 것이 이상적
+
+#### 훈련이 멈춤 (Hang)
+```bash
+# 타임아웃 설정 증가
+export NCCL_TIMEOUT=3600
+
+# 동기화 문제 디버깅
+export CUDA_LAUNCH_BLOCKING=1
+```
+
+#### 프로세스 정리
+```bash
+# 남아있는 분산 훈련 프로세스 종료
+pkill -f "train_mappo"
+
+# 특정 GPU의 프로세스 확인
+fuser -v /dev/nvidia*
+```
 
 ## 참고 문헌
 

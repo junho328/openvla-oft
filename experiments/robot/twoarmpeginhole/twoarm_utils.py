@@ -38,17 +38,18 @@ TASK_DESCRIPTIONS_SPLIT = {
 }
 
 # More detailed split instructions
+# TASK_DESCRIPTIONS_SPLIT_DETAILED = {
+#     "robot0": "You are the left robot. Move the peg and insert it into the hole.",
+#     "robot1": "You are the right robot. Position the hole so it can receive the peg.",
+# }
 TASK_DESCRIPTIONS_SPLIT_DETAILED = {
-    "robot0": "move peg toward hole to insert",
-    "robot1": "align hole to receive peg",
+    "robot0": "You are the left robot. Your goal is to insert the green peg inside the hole of the red square.",
+    "robot1": "You are the right robot. Your goal is to align with the green peg so that it can be inserted into the hole of the red square.",
 }
-
-# Alternative instruction sets (can be customized)
-TASK_DESCRIPTIONS_COOPERATIVE = {
-    "robot0": "insert peg into hole",
-    "robot1": "assist peg insertion by holding hole",
-}
-
+# TASK_DESCRIPTIONS_SPLIT_DETAILED = {
+#     "robot0": "You are the left robot from the frontview. Lay down the green peg.",
+#     "robot1": "You are the right robot from the frontview. Raise up the red square.",
+# }
 
 def get_twoarm_task_descriptions(mode: str = INSTRUCTION_MODE_SHARED, custom_descriptions: dict = None):
     """Get task descriptions for each robot based on the instruction mode.
@@ -97,8 +98,21 @@ def get_twoarm_env(
     controller="BASIC",
     env_configuration="opposed",
     reward_shaping=False,
+    # Dense reward component weights (only used when reward_shaping=True)
+    reaching_weight=1.0,
+    perpendicular_weight=1.0,
+    parallel_weight=1.0,
+    alignment_weight=1.0,
 ):
-    """Initializes and returns the TwoArmPegInHole environment, along with the task description."""
+    """Initializes and returns the TwoArmPegInHole environment, along with the task description.
+    
+    Dense Reward Components (when reward_shaping=True):
+        - reaching_weight: Weight for distance-based reward (peg-hole distance)
+                          WARNING: High values may cause robots to collide without alignment
+        - perpendicular_weight: Weight for perpendicular alignment reward
+        - parallel_weight: Weight for parallel (depth) positioning reward  
+        - alignment_weight: Weight for angular alignment reward (cos similarity)
+    """
     task_description = "insert peg in hole"
     controller_config = load_composite_controller_config(controller=controller)
     body_parts = controller_config.get("body_parts", {})
@@ -122,6 +136,10 @@ def get_twoarm_env(
         camera_widths=resolution,
         control_freq=20,
         reward_shaping=reward_shaping,
+        reaching_weight=reaching_weight,
+        perpendicular_weight=perpendicular_weight,
+        parallel_weight=parallel_weight,
+        alignment_weight=alignment_weight,
     )
     
     # Warm up the offscreen renderer to avoid noise in first episode
@@ -160,14 +178,14 @@ def get_twoarm_image(obs):
 
 
 def get_twoarm_video_frame(obs):
-    """Extracts image for video logging (prefer frontview).
+    """Extracts image for video logging (prefer agentview).
     
     Note: robosuite reuses observation buffers, so we must make deep copies
     to avoid all frames showing the same (last) image.
     """
-    if "frontview_image" in obs:
+    if "agentview_image" in obs:
         # Get the raw image and make a deep copy immediately
-        raw_img = obs["frontview_image"]
+        raw_img = obs["agentview_image"]
         # Flip vertically and create a new contiguous array (robosuite images are upside down)
         # Using [::-1] like libero, then .copy() to ensure independent array
         img = raw_img[::-1].copy()
@@ -181,7 +199,18 @@ def get_twoarm_video_frame(obs):
         
         return img
     
-    # Fallback to agentview with explicit copy
+    # Fallback to frontview with explicit copy
+    if "frontview_image" in obs:
+        raw_img = obs["frontview_image"]
+        img = raw_img[::-1].copy()
+        if img.dtype != np.uint8:
+            if img.max() <= 1.05:
+                img = (img * 255).astype(np.uint8)
+            else:
+                img = np.clip(img, 0, 255).astype(np.uint8)
+        return img
+    
+    # Final fallback using get_twoarm_image
     return get_twoarm_image(obs).copy()
 
 

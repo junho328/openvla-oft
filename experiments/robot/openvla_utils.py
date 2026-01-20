@@ -36,6 +36,16 @@ from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 # Initialize important constants
 DATE = time.strftime("%Y_%m_%d")
 DATE_TIME = time.strftime("%Y_%m_%d-%H_%M_%S")
+# Function to get current CUDA device - important for DDP
+# Each process should use its own GPU based on torch.cuda.current_device()
+def get_current_device():
+    """Get the current CUDA device (respects torch.cuda.set_device())."""
+    if torch.cuda.is_available():
+        return torch.device(f"cuda:{torch.cuda.current_device()}")
+    return torch.device("cpu")
+
+# Legacy constant for backward compatibility (defaults to cuda:0 at import time)
+# For DDP, use get_current_device() instead
 DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 OPENVLA_IMAGE_SIZE = 224  # Standard image size expected by OpenVLA
 
@@ -299,8 +309,10 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     vla.eval()
 
     # Move model to device if not using quantization
+    # Use get_current_device() to respect torch.cuda.set_device() for DDP
     if not cfg.load_in_8bit and not cfg.load_in_4bit:
-        vla = vla.to(DEVICE)
+        device = get_current_device()
+        vla = vla.to(device)
 
     # Load dataset stats for action normalization
     _load_dataset_stats(vla, cfg.pretrained_checkpoint)
@@ -403,11 +415,13 @@ def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int) -> ProprioPr
         ProprioProjector: The initialized proprio projector
     """
     # Initialize projector and move to device
+    # Use get_current_device() for DDP compatibility
+    device = get_current_device()
     proprio_projector = ProprioProjector(
         llm_dim=llm_dim,
         proprio_dim=proprio_dim,
-    ).to(DEVICE)
-    proprio_projector = proprio_projector.to(torch.bfloat16).to(DEVICE)
+    ).to(device)
+    proprio_projector = proprio_projector.to(torch.bfloat16).to(device)
     proprio_projector.eval()
 
     # Find and load checkpoint (may be on Hugging Face Hub or stored locally)
@@ -447,10 +461,12 @@ def get_noisy_action_projector(cfg: Any, llm_dim: int) -> NoisyActionProjector:
         NoisyActionProjector: The initialized noisy action projector
     """
     # Initialize projector and move to device
+    # Use get_current_device() for DDP compatibility
+    device = get_current_device()
     noisy_action_projector = NoisyActionProjector(
         llm_dim=llm_dim,
-    ).to(DEVICE)
-    noisy_action_projector = noisy_action_projector.to(torch.bfloat16).to(DEVICE)
+    ).to(device)
+    noisy_action_projector = noisy_action_projector.to(torch.bfloat16).to(device)
     noisy_action_projector.eval()
 
     # Find and load checkpoint
@@ -478,6 +494,9 @@ def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead, Dif
     assert not (cfg.use_l1_regression and cfg.use_diffusion), "Cannot use both L1 regression and diffusion action head!"
 
     # Initialize appropriate action head based on configuration
+    # Use get_current_device() for DDP compatibility
+    device = get_current_device()
+    
     if cfg.use_l1_regression:
         action_head = L1RegressionActionHead(input_dim=llm_dim, hidden_dim=llm_dim, action_dim=ACTION_DIM)
     elif cfg.use_diffusion:
@@ -489,7 +508,7 @@ def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead, Dif
     else:
         raise ValueError("Either use_l1_regression or use_diffusion must be True")
 
-    action_head = action_head.to(torch.bfloat16).to(DEVICE)
+    action_head = action_head.to(torch.bfloat16).to(device)
     action_head.eval()
 
     # Find and load checkpoint (may be on Hugging Face Hub or stored locally)
@@ -757,12 +776,14 @@ def get_vla_action(
         prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
 
         # Process primary image
-        inputs = processor(prompt, primary_image).to(DEVICE, dtype=torch.bfloat16)
+        # Use get_current_device() for DDP compatibility
+        device = get_current_device()
+        inputs = processor(prompt, primary_image).to(device, dtype=torch.bfloat16)
 
         # Process additional wrist images if any
         if all_images:
             all_wrist_inputs = [
-                processor(prompt, image_wrist).to(DEVICE, dtype=torch.bfloat16) for image_wrist in all_images
+                processor(prompt, image_wrist).to(device, dtype=torch.bfloat16) for image_wrist in all_images
             ]
             # Concatenate all images
             primary_pixel_values = inputs["pixel_values"]

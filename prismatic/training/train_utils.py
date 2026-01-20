@@ -23,11 +23,16 @@ def get_current_action_mask(token_ids):
 
 
 def get_next_actions_mask(token_ids):
+    # Handle None labels (inference mode)
+    if token_ids is None:
+        return None
+    
     # Create a tensor marking positions of IGNORE_INDEX
     newline_positions = token_ids != IGNORE_INDEX
 
     # Calculate cumulative sum to identify regions between newlines
-    cumsum = torch.cumsum(newline_positions, dim=1)
+    # Convert bool to int for cumsum compatibility
+    cumsum = torch.cumsum(newline_positions.int(), dim=1)
 
     # Create the mask
     mask = cumsum > ACTION_DIM

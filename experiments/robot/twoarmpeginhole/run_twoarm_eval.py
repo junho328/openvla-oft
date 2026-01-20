@@ -48,7 +48,7 @@ from experiments.robot.twoarmpeginhole.twoarm_utils import (
 )
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
 
-TASK_MAX_STEPS = 300
+TASK_MAX_STEPS = 600
 
 # Set up logging
 logging.basicConfig(
@@ -95,7 +95,7 @@ class GenerateConfig:
     controller: str = "BASIC"                         # Controller type
     env_configuration: str = "opposed"                # Robot configuration in the environment
     reward_shaping: bool = False                      # Whether to use dense reward shaping
-    num_steps_wait: int = 10                          # Number of steps to wait for objects to stabilize in sim
+    num_steps_wait: int = 3                          # Number of steps to wait for objects to stabilize in sim
     num_trials_per_task: int = 50                     # Number of rollouts per task
     env_img_res: int = 256                            # Resolution for environment images (not policy input resolution)
 

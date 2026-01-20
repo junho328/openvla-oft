@@ -153,3 +153,5 @@ rollouts/
 wandb/
 
 *.txt
+logs/
+runs/
