@@ -93,7 +93,7 @@ class DualArmMAPPOConfig:
     
     # Normalization key for action/proprio (from VLA's norm_stats)
     # If None, uses the first available key; otherwise uses the specified key
-    unnorm_key: Optional[str] = "aloha_velroc_dataset"
+    unnorm_key: Optional[str] = "aloha_velcro_dataset"
     
     # Gradient checkpointing to reduce GPU memory usage (trades compute for memory)
     use_gradient_checkpointing: bool = True

@@ -372,6 +372,9 @@ class DualArmACPPOTrainer:
         
         policy_module = self.policy.module if self.distributed else self.policy
         
+        # Initialize chunk_done before the loop (used for GAE computation after loop)
+        chunk_done = False
+        
         for step_in_rollout in range(self.cfg.num_steps_per_rollout // self.cfg.num_actions_chunk):
             with torch.no_grad():
                 agent_obs = self.obs_history.get_all_agent_observations(include_history=True)

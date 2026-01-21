@@ -71,7 +71,7 @@ GAMMA=0.99
 GAMMA_PRIME=0.99
 GAE_LAMBDA=0.95
 LAMBDA_PRIME=0.95
-NUM_ACTIONS_CHUNK=1
+NUM_ACTIONS_CHUNK=10
 
 # Environment settings
 REWARD_SHAPING=true
@@ -188,24 +188,24 @@ export WANDB_MODE=offline
 # --standalone: Single node training
 # --nnodes=1: Number of nodes
 # --nproc_per_node: Number of processes (GPUs) per node
-# nohup torchrun \
-#     --standalone \
-#     --nnodes=1 \
-#     --nproc_per_node=$NUM_GPUS \
-#     --rdzv_backend=c10d \
-#     --rdzv_endpoint=localhost:29501 \
-#     -m experiments.robot.twoarmpeginhole.dualarm_acppo.train_acppo \
-#     "${TRAIN_ARGS[@]}" > "$LOG_FILE" 2>&1 &
-
-# For foreground execution (debugging), uncomment below:
-torchrun \
+nohup torchrun \
     --standalone \
     --nnodes=1 \
     --nproc_per_node=$NUM_GPUS \
     --rdzv_backend=c10d \
     --rdzv_endpoint=localhost:29501 \
     -m experiments.robot.twoarmpeginhole.dualarm_acppo.train_acppo \
-    "${TRAIN_ARGS[@]}"
+    "${TRAIN_ARGS[@]}" > "$LOG_FILE" 2>&1 &
+
+# For foreground execution (debugging), uncomment below:
+# torchrun \
+#     --standalone \
+#     --nnodes=1 \
+#     --nproc_per_node=$NUM_GPUS \
+#     --rdzv_backend=c10d \
+#     --rdzv_endpoint=localhost:29501 \
+#     -m experiments.robot.twoarmpeginhole.dualarm_acppo.train_acppo \
+#     "${TRAIN_ARGS[@]}"
 
 PID=$!
 echo "Training started with PID: $PID"
