@@ -51,7 +51,7 @@ RUN_ROOT_DIR="${RUN_ROOT_DIR:-/home/work/aipr-jhna/output/twoarmpeginhole/mappo_
 
 # Training hyperparameters (adjusted for multi-GPU)
 # Note: Effective batch size = BATCH_SIZE * NUM_GPUS
-TOTAL_TIMESTEPS=50000
+TOTAL_TIMESTEPS=10000
 NUM_STEPS_PER_ROLLOUT=16
 BATCH_SIZE=4
 # Conservative learning rates for VLA-based multi-agent RL

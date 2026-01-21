@@ -277,7 +277,7 @@ def prepare_vla_input(
     
     # Build prompt with optional agent identity prefix
     if agent_idx is not None:
-        prompt = f"In: You are robot {agent_idx}. What action should the robot take to {task_description.lower()}?\nOut:"
+        prompt = f"In: You are robot {agent_idx}. You need to cooperate with the other robot to complete {task_description.lower()} task. What action should you take to {task_description.lower()}?\nOut:"
     else:
         prompt = f"In: What action should the robot take to {task_description.lower()}?\nOut:"
     

@@ -180,8 +180,8 @@ torchrun --standalone --nnodes 1 --nproc-per-node 4 vla-scripts/finetune.py \
   --use_film True \
   --num_images_in_input 3 \
   --use_proprio True \
-  --batch_size 16 \
-  --grad_accumulation_steps 4 \
+  --batch_size 8 \
+  --grad_accumulation_steps 2 \
   --learning_rate 5e-4 \
   --num_steps_before_decay 50000 \
   --max_steps 100000 \

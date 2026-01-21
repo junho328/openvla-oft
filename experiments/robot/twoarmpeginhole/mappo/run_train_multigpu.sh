@@ -69,7 +69,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR/../../../.."
 
 # Setup environment
-export WANDB_MODE=online
+
 export OMP_NUM_THREADS=4
 
 # NCCL settings for optimal performance
@@ -128,7 +128,7 @@ TRAIN_ARGS=(
     --eval_freq 50
     --save_freq 100
     --history_length 2
-    --num_actions_chunk 1
+    --num_actions_chunk 4
     --seed 42
     --run_id_note "multigpu_${NUM_GPUS}gpus"
 )
@@ -147,6 +147,8 @@ echo ""
 # --standalone: Single node training
 # --nnodes=1: Number of nodes
 # --nproc_per_node: Number of processes (GPUs) per node
+export WANDB_MODE=offline
+
 nohup torchrun \
     --standalone \
     --nnodes=1 \

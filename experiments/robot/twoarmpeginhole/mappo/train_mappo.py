@@ -906,13 +906,12 @@ class MAPPOTrainer:
             episode_lengths.append(episode_length)
             episode_successes.append(float(success))
             
+            # Collect video data for later saving (after all_reduce to avoid timeout)
             if should_save_video and replay_images:
-                import imageio
+                if not hasattr(self, '_pending_videos'):
+                    self._pending_videos = []
                 video_filename = f"step_{self.global_step}_ep_{ep}_success_{success}.mp4"
-                video_writer = imageio.get_writer(str(video_dir / video_filename), fps=20)
-                for frame in replay_images: video_writer.append_data(frame)
-                video_writer.close()
-                logger.info(f"Saved eval video: {video_filename}")
+                self._pending_videos.append((video_dir, video_filename, list(replay_images)))
 
         # Aggregate metrics from all workers
         mean_reward = np.mean(episode_rewards) if episode_rewards else 0.0
@@ -925,37 +924,54 @@ class MAPPOTrainer:
             "eval/success_rate": mean_success,
             "eval/mean_episode_length": mean_length,
         }
-        return self._average_stats(stats)
+        
+        # First synchronize stats across all GPUs (this was causing timeout before)
+        result = self._average_stats(stats)
+        
+        # Now save videos AFTER all_reduce (only rank 0, won't block other ranks)
+        if hasattr(self, '_pending_videos') and self._pending_videos:
+            import imageio
+            for video_dir, video_filename, frames in self._pending_videos:
+                video_writer = imageio.get_writer(str(video_dir / video_filename), fps=20)
+                for frame in frames: video_writer.append_data(frame)
+                video_writer.close()
+                logger.info(f"Saved eval video: {video_filename}")
+            self._pending_videos = []
+        
+        return result
 
     def save_checkpoint(self, suffix: str = ""):
-        """Save training checkpoint (Rank 0 only)."""
-        if self.rank != 0: return
-        
-        checkpoint_dir = self.run_dir / f"checkpoint_{self.global_step}{suffix}"
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
-        policy_module = self.policy.module if self.distributed else self.policy
-        torch.save(policy_module.state_dict(), checkpoint_dir / "policy.pt")
-        torch.save({
-            "optimizer": self.optimizer.state_dict(),
-            "global_step": self.global_step,
-            "episode_count": self.episode_count,
-            "best_success_rate": self.best_success_rate,
-        }, checkpoint_dir / "training_state.pt")
-        
-        # Save reward normalizer state if used
-        if self.reward_normalizer is not None:
+        """Save training checkpoint (Rank 0 only, with barrier for sync)."""
+        if self.rank == 0:
+            checkpoint_dir = self.run_dir / f"checkpoint_{self.global_step}{suffix}"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            
+            policy_module = self.policy.module if self.distributed else self.policy
+            torch.save(policy_module.state_dict(), checkpoint_dir / "policy.pt")
             torch.save({
-                "mean": self.reward_normalizer.return_rms.mean,
-                "var": self.reward_normalizer.return_rms.var,
-                "count": self.reward_normalizer.return_rms.count,
-                "returns": self.reward_normalizer.returns,
-            }, checkpoint_dir / "reward_normalizer.pt")
+                "optimizer": self.optimizer.state_dict(),
+                "global_step": self.global_step,
+                "episode_count": self.episode_count,
+                "best_success_rate": self.best_success_rate,
+            }, checkpoint_dir / "training_state.pt")
+            
+            # Save reward normalizer state if used
+            if self.reward_normalizer is not None:
+                torch.save({
+                    "mean": self.reward_normalizer.return_rms.mean,
+                    "var": self.reward_normalizer.return_rms.var,
+                    "count": self.reward_normalizer.return_rms.count,
+                    "returns": self.reward_normalizer.returns,
+                }, checkpoint_dir / "reward_normalizer.pt")
+            
+            config_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(self.cfg).items()}
+            with open(checkpoint_dir / "config.json", "w") as f:
+                json.dump(config_dict, f, indent=2, default=str)
+            logger.info(f"Saved checkpoint to {checkpoint_dir}")
         
-        config_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(self.cfg).items()}
-        with open(checkpoint_dir / "config.json", "w") as f:
-            json.dump(config_dict, f, indent=2, default=str)
-        logger.info(f"Saved checkpoint to {checkpoint_dir}")
+        # Barrier to ensure all ranks wait for checkpoint saving to complete
+        if self.distributed:
+            dist.barrier()
     
     def load_checkpoint(self, checkpoint_path: Path):
         """

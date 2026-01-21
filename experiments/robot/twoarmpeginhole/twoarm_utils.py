@@ -29,7 +29,7 @@ INSTRUCTION_MODE_SPLIT = "split"            # Each robot gets a different instru
 INSTRUCTION_MODE_SPLIT_DETAILED = "split_detailed"  # More detailed separate instructions
 
 # Shared instruction (default)
-TASK_DESCRIPTION_SHARED = "insert peg in hole"
+TASK_DESCRIPTION_SHARED = "insert the green peg into the hole of the red square"
 
 # Split instructions - Robot 0 handles peg, Robot 1 handles hole
 TASK_DESCRIPTIONS_SPLIT = {

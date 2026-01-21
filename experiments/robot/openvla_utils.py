@@ -514,13 +514,14 @@ def get_noisy_action_projector(cfg: Any, llm_dim: int) -> NoisyActionProjector:
     return noisy_action_projector
 
 
-def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead, DiffusionActionHead]:
+def get_action_head(cfg: Any, llm_dim: int, action_dim: int = None) -> Union[L1RegressionActionHead, DiffusionActionHead]:
     """
     Get action head for continuous value prediction.
 
     Args:
         cfg: Configuration object with model parameters
         llm_dim: Dimension of the language model
+        action_dim: Action dimension (default: ACTION_DIM from constants, use 14 for bimanual)
 
     Returns:
         Union[L1RegressionActionHead, DiffusionActionHead]: The initialized action head
@@ -530,15 +531,19 @@ def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead, Dif
     """
     assert not (cfg.use_l1_regression and cfg.use_diffusion), "Cannot use both L1 regression and diffusion action head!"
 
+    # Use provided action_dim or default to ACTION_DIM constant
+    if action_dim is None:
+        action_dim = ACTION_DIM
+
     # Initialize appropriate action head based on configuration
     # Use get_current_device() for DDP compatibility
     device = get_current_device()
     
     if cfg.use_l1_regression:
-        action_head = L1RegressionActionHead(input_dim=llm_dim, hidden_dim=llm_dim, action_dim=ACTION_DIM)
+        action_head = L1RegressionActionHead(input_dim=llm_dim, hidden_dim=llm_dim, action_dim=action_dim)
     elif cfg.use_diffusion:
         action_head = DiffusionActionHead(
-            input_dim=llm_dim, hidden_dim=llm_dim, action_dim=ACTION_DIM, num_diffusion_steps_train=cfg.num_diffusion_steps_train
+            input_dim=llm_dim, hidden_dim=llm_dim, action_dim=action_dim, num_diffusion_steps_train=cfg.num_diffusion_steps_train
         )
         # Set number of diffusion steps for inference
         action_head.noise_scheduler.set_timesteps(cfg.num_diffusion_steps_inference)

@@ -48,7 +48,7 @@ from experiments.robot.twoarmpeginhole.twoarm_utils import (
 )
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
 
-TASK_MAX_STEPS = 600
+TASK_MAX_STEPS = 500
 
 # Set up logging
 logging.basicConfig(
@@ -74,7 +74,7 @@ class GenerateConfig:
     num_diffusion_steps_train: int = 50              # (When `diffusion==True`) Number of diffusion steps used for training
     num_diffusion_steps_inference: int = 50          # (When `diffusion==True`) Number of diffusion steps used for inference
     use_film: bool = False                           # If True, uses FiLM to infuse language inputs into visual features
-    num_images_in_input: int = 2                     # Number of images in the VLA input (default: 1)
+    num_images_in_input: int = 3                     # Number of images in the VLA input (ALOHA bimanual uses 3: top + 2 wrists)
     use_proprio: bool = True                         # Whether to include proprio state in input
 
     center_crop: bool = True                         # Center crop? (if trained w/ random crop image aug)
@@ -86,6 +86,10 @@ class GenerateConfig:
 
     load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
+    
+    # Bimanual model support
+    use_bimanual_model: bool = False                 # If True, uses bimanual (dual-arm) model with 14-dim action output
+    bimanual_action_dim: int = 14                    # Total action dimension for bimanual model (7 per arm)
 
     #################################################################################################################
     # TwoArmPegInHole environment-specific parameters
@@ -134,6 +138,11 @@ def initialize_model(cfg: GenerateConfig):
     """Initialize model and associated components."""
     # Load model
     model = get_model(cfg)
+    
+    # Set number of images for vision backbone (ALOHA bimanual uses 3 images)
+    if hasattr(model, 'vision_backbone') and hasattr(model.vision_backbone, 'set_num_images_in_input'):
+        model.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
+        logger.info(f">> Set vision backbone num_images_in_input to {cfg.num_images_in_input}")
 
     # Get OpenVLA processor if needed
     processor = None
@@ -144,16 +153,20 @@ def initialize_model(cfg: GenerateConfig):
     # Load proprio projector if needed
     proprio_projector = None
     if cfg.use_proprio:
+        # Bimanual model uses 14-dim proprio (7 per arm), single-arm uses 8-dim
+        proprio_dim = 14 if cfg.use_bimanual_model else 8
         proprio_projector = get_proprio_projector(
             cfg,
             model.llm_dim,
-            proprio_dim=8,
+            proprio_dim=proprio_dim,
         )
 
     # Load action head if needed
     action_head = None
     if cfg.use_l1_regression or cfg.use_diffusion:
-        action_head = get_action_head(cfg, model.llm_dim)
+        # Bimanual model uses 14-dim action, single-arm uses 6-dim (default)
+        action_dim = cfg.bimanual_action_dim if cfg.use_bimanual_model else None
+        action_head = get_action_head(cfg, model.llm_dim, action_dim=action_dim)
 
     # Load noisy action projector if using diffusion
     noisy_action_projector = None
@@ -164,7 +177,13 @@ def initialize_model(cfg: GenerateConfig):
 
 
 def check_unnorm_key(cfg: GenerateConfig, model) -> None:
-    """Check that the model contains the action un-normalization key."""
+    """Check that the model contains the action un-normalization key.
+    
+    Also loads dataset_statistics.json if present in checkpoint directory
+    and the key is not found in model.norm_stats.
+    """
+    import json
+    
     unnorm_key = cfg.unnorm_key or "libero_spatial"
 
     # In some cases, the key must be manually modified (e.g. after training on a modified version of the dataset
@@ -172,10 +191,36 @@ def check_unnorm_key(cfg: GenerateConfig, model) -> None:
     if unnorm_key not in model.norm_stats and f"{unnorm_key}_no_noops" in model.norm_stats:
         unnorm_key = f"{unnorm_key}_no_noops"
 
-    assert unnorm_key in model.norm_stats, f"Action un-norm key {unnorm_key} not found in VLA `norm_stats`!"
+    # If key not found, try loading from dataset_statistics.json in checkpoint directory
+    if unnorm_key not in model.norm_stats:
+        checkpoint_dir = Path(cfg.pretrained_checkpoint)
+        dataset_stats_path = checkpoint_dir / "dataset_statistics.json"
+        
+        if dataset_stats_path.exists():
+            logger.info(f"Loading dataset statistics from {dataset_stats_path}")
+            with open(dataset_stats_path, "r") as f:
+                dataset_stats = json.load(f)
+            
+            # Add loaded stats to model.norm_stats
+            for key, stats in dataset_stats.items():
+                if key not in model.norm_stats:
+                    model.norm_stats[key] = stats
+                    logger.info(f"  Added norm_stats key: {key}")
+            
+            # Check if unnorm_key is now available
+            if unnorm_key not in model.norm_stats:
+                available_keys = list(model.norm_stats.keys())
+                # Try to find a matching ALOHA key
+                aloha_keys = [k for k in available_keys if 'aloha' in k.lower()]
+                if aloha_keys:
+                    unnorm_key = aloha_keys[0]
+                    logger.info(f"  Using ALOHA dataset key: {unnorm_key}")
+
+    assert unnorm_key in model.norm_stats, f"Action un-norm key {unnorm_key} not found in VLA `norm_stats`! Available keys: {list(model.norm_stats.keys())}"
 
     # Set the unnorm_key in cfg
     cfg.unnorm_key = unnorm_key
+    logger.info(f"Using unnorm_key: {unnorm_key}")
 
 
 
@@ -213,7 +258,7 @@ def log_message(message: str, log_file=None):
 
 
 def prepare_robot_observation(obs, resize_size, robot_index: int):
-    """Prepare per-robot observation for policy input."""
+    """Prepare per-robot observation for policy input (single-arm model)."""
     img = get_twoarm_image(obs)
     wrist_img0, wrist_img1 = get_twoarm_wrist_image(obs)
     wrist_img = wrist_img0 if robot_index == 0 else wrist_img1
@@ -234,6 +279,57 @@ def prepare_robot_observation(obs, resize_size, robot_index: int):
     return observation, img
 
 
+def prepare_bimanual_observation(obs, resize_size):
+    """
+    Prepare observation for bimanual (dual-arm) model.
+    
+    Bimanual model expects:
+    - agentview image (shared)
+    - left wrist image (robot0)
+    - right wrist image (robot1)
+    - 14-dim proprio state (7-dim per arm from joint positions)
+    
+    Returns:
+        observation: Dict with images and state
+        img: Raw agentview image for video
+    """
+    # Get images
+    img = get_twoarm_image(obs)
+    wrist_img0, wrist_img1 = get_twoarm_wrist_image(obs)
+    
+    img_resized = resize_image_for_policy(img, resize_size)
+    wrist_img0_resized = resize_image_for_policy(wrist_img0, resize_size)
+    wrist_img1_resized = resize_image_for_policy(wrist_img1, resize_size)
+    
+    # Get 14-dim bimanual proprio state (7-dim joint positions per arm)
+    # TwoArmPegInHole provides robot{i}_joint_pos with 7-dim (Panda has 7 DoF)
+    left_arm_joint = obs.get("robot0_joint_pos", np.zeros(7))
+    right_arm_joint = obs.get("robot1_joint_pos", np.zeros(7))
+    
+    # Ensure 7-dim per arm
+    if len(left_arm_joint) < 7:
+        left_arm_joint = np.pad(left_arm_joint, (0, 7 - len(left_arm_joint)))
+    else:
+        left_arm_joint = left_arm_joint[:7]
+        
+    if len(right_arm_joint) < 7:
+        right_arm_joint = np.pad(right_arm_joint, (0, 7 - len(right_arm_joint)))
+    else:
+        right_arm_joint = right_arm_joint[:7]
+    
+    # Combine to 14-dim bimanual state
+    state = np.concatenate([left_arm_joint, right_arm_joint]).astype(np.float32)
+    
+    observation = {
+        "full_image": img_resized,
+        "wrist_image_left": wrist_img0_resized,
+        "wrist_image_right": wrist_img1_resized,
+        "state": state,
+    }
+    
+    return observation, img
+
+
 def run_episode(
     cfg: GenerateConfig,
     env,
@@ -249,6 +345,10 @@ def run_episode(
 ):
     """Run a single episode in the environment.
     
+    Supports both single-arm and bimanual models:
+    - Single-arm: queries model separately for each robot (2 queries per chunk)
+    - Bimanual: queries model once for 14-dim action (1 query per chunk), splits for each robot
+    
     Args:
         task_description_robot0: Task instruction for robot 0 (peg robot)
         task_description_robot1: Task instruction for robot 1 (hole robot)
@@ -263,8 +363,14 @@ def run_episode(
             f"({NUM_ACTIONS_CHUNK}) constant defined in prismatic.vla.constants! For best performance (in terms of "
             "both speed and success rate), we recommend executing the full action chunk."
         )
-    action_queue_0 = deque(maxlen=cfg.num_open_loop_steps)
-    action_queue_1 = deque(maxlen=cfg.num_open_loop_steps)
+    
+    # For bimanual model: single queue with (action_0, action_1) tuples
+    # For single-arm model: separate queues
+    if cfg.use_bimanual_model:
+        action_queue = deque(maxlen=cfg.num_open_loop_steps)
+    else:
+        action_queue_0 = deque(maxlen=cfg.num_open_loop_steps)
+        action_queue_1 = deque(maxlen=cfg.num_open_loop_steps)
 
     # Setup
     t = 0
@@ -283,44 +389,88 @@ def run_episode(
             # Save frame for video
             replay_images.append(get_twoarm_video_frame(obs))
 
-            # Prepare per-robot observations
-            obs_robot0, _ = prepare_robot_observation(obs, resize_size, robot_index=0)
-            obs_robot1, _ = prepare_robot_observation(obs, resize_size, robot_index=1)
+            if cfg.use_bimanual_model:
+                # === Bimanual Model: Single query for 14-dim action ===
+                if len(action_queue) == 0:
+                    # Prepare bimanual observation
+                    obs_bimanual, _ = prepare_bimanual_observation(obs, resize_size)
+                    
+                    # Query model once for bimanual action chunk
+                    # Use combined task description or robot0's description
+                    task_description = task_description_robot0
+                    
+                    actions = get_action(
+                        cfg,
+                        model,
+                        obs_bimanual,
+                        task_description,
+                        processor=processor,
+                        action_head=action_head,
+                        proprio_projector=proprio_projector,
+                        noisy_action_projector=noisy_action_projector,
+                        use_film=cfg.use_film,
+                    )
+                    
+                    # Split 14-dim actions into (7-dim, 7-dim) tuples for each robot
+                    for action_14dim in actions:
+                        action_14dim = np.asarray(action_14dim)
+                        if action_14dim.shape[-1] >= cfg.bimanual_action_dim:
+                            action_0 = action_14dim[..., :7]  # Left arm (robot0)
+                            action_1 = action_14dim[..., 7:14]  # Right arm (robot1)
+                        else:
+                            # Fallback: pad if needed
+                            action_0 = action_14dim[..., :min(7, action_14dim.shape[-1])]
+                            action_1 = action_14dim[..., 7:] if action_14dim.shape[-1] > 7 else np.zeros(7)
+                            if action_0.shape[-1] < 7:
+                                action_0 = np.pad(action_0, (0, 7 - action_0.shape[-1]))
+                            if len(action_1) < 7:
+                                action_1 = np.pad(action_1, (0, 7 - len(action_1)))
+                        
+                        action_queue.append((action_0, action_1))
+                
+                # Get action tuple from queue
+                action_0, action_1 = action_queue.popleft()
+                
+            else:
+                # === Single-Arm Model: Separate queries for each robot ===
+                # Prepare per-robot observations
+                obs_robot0, _ = prepare_robot_observation(obs, resize_size, robot_index=0)
+                obs_robot1, _ = prepare_robot_observation(obs, resize_size, robot_index=1)
 
-            # If action queue is empty, requery model for each robot with their respective instructions
-            if len(action_queue_0) == 0:
-                actions_0 = get_action(
-                    cfg,
-                    model,
-                    obs_robot0,
-                    task_description_robot0,  # Robot 0 specific instruction
-                    processor=processor,
-                    action_head=action_head,
-                    proprio_projector=proprio_projector,
-                    noisy_action_projector=noisy_action_projector,
-                    use_film=cfg.use_film,
-                )
-                action_queue_0.extend(actions_0)
+                # If action queue is empty, requery model for each robot
+                if len(action_queue_0) == 0:
+                    actions_0 = get_action(
+                        cfg,
+                        model,
+                        obs_robot0,
+                        task_description_robot0,
+                        processor=processor,
+                        action_head=action_head,
+                        proprio_projector=proprio_projector,
+                        noisy_action_projector=noisy_action_projector,
+                        use_film=cfg.use_film,
+                    )
+                    action_queue_0.extend(actions_0)
 
-            if len(action_queue_1) == 0:
-                actions_1 = get_action(
-                    cfg,
-                    model,
-                    obs_robot1,
-                    task_description_robot1,  # Robot 1 specific instruction
-                    processor=processor,
-                    action_head=action_head,
-                    proprio_projector=proprio_projector,
-                    noisy_action_projector=noisy_action_projector,
-                    use_film=cfg.use_film,
-                )
-                action_queue_1.extend(actions_1)
+                if len(action_queue_1) == 0:
+                    actions_1 = get_action(
+                        cfg,
+                        model,
+                        obs_robot1,
+                        task_description_robot1,
+                        processor=processor,
+                        action_head=action_head,
+                        proprio_projector=proprio_projector,
+                        noisy_action_projector=noisy_action_projector,
+                        use_film=cfg.use_film,
+                    )
+                    action_queue_1.extend(actions_1)
 
-            # Get action from queues
-            action_0 = np.asarray(action_queue_0.popleft())
-            action_1 = np.asarray(action_queue_1.popleft())
+                # Get action from queues
+                action_0 = np.asarray(action_queue_0.popleft())
+                action_1 = np.asarray(action_queue_1.popleft())
 
-            # Drop gripper or extra dims (use first 6 dims per arm)
+            # Drop gripper or extra dims (use first 6 dims per arm for TwoArmPegInHole)
             if action_0.shape[-1] > 6:
                 action_0 = action_0[..., :6]
             if action_1.shape[-1] > 6:
@@ -343,7 +493,10 @@ def run_episode(
             t += 1
 
     except Exception as e:
-        log_message(f"Episode error: {e}", log_file)
+        import traceback
+        error_msg = f"Episode error: {e}\n{traceback.format_exc()}"
+        log_message(error_msg, log_file)
+        logger.error(error_msg)
 
     return success, replay_images
 

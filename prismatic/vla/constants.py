@@ -65,15 +65,20 @@ TWOARM_ACPPO_CONSTANTS = {
 def detect_robot_platform():
     cmd_args = " ".join(sys.argv).lower()
 
-    # Check ACPPO first (more specific than TWOARM)
-    if "acppo" in cmd_args:
+    # Check for bimanual model usage first (highest priority)
+    # When using bimanual ALOHA model for TwoArm eval, use ALOHA constants
+    if "use_bimanual_model" in cmd_args or "bimanual" in cmd_args:
+        return "ALOHA"
+    # Check ALOHA explicitly
+    elif "aloha" in cmd_args:
+        return "ALOHA"
+    # Check ACPPO (more specific than TWOARM)
+    elif "acppo" in cmd_args:
         return "TWOARM_ACPPO"
     elif "twoarm" in cmd_args or "mappo" in cmd_args or "two_arm" in cmd_args:
         return "TWOARM"
     elif "libero" in cmd_args:
         return "LIBERO"
-    elif "aloha" in cmd_args:
-        return "ALOHA"
     elif "bridge" in cmd_args:
         return "BRIDGE"
     else:
