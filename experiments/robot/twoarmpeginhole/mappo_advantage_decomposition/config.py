@@ -135,7 +135,7 @@ class MAPPOConfig:
     num_steps_wait: int = 10
     
     # Early termination
-    max_peg_hole_distance: float = 1.4  # Early terminate if peg-hole distance exceeds this (in meters)
+    max_peg_hole_distance: float = 50  # Early terminate if peg-hole distance exceeds this (in meters)
                                          # Note: Initial distance in "opposed" config is ~0.18m (18cm)
                                          # Setting to 0.4m (~2.2x initial) allows tolerance before early termination
     

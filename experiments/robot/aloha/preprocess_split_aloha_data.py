@@ -81,6 +81,7 @@ def load_and_preprocess_all_episodes(demo_paths, out_dataset_dir):
     Loads and preprocesses all episodes.
     Resizes all images in one episode before loading the next, to reduce memory usage.
     """
+    # Only process cameras that OpenVLA-OFT expects (exclude cam_low if present)
     cam_names = ["cam_high", "cam_left_wrist", "cam_right_wrist"]
     idx = 0
     for demo in tqdm(demo_paths):
@@ -101,13 +102,15 @@ def load_and_preprocess_all_episodes(demo_paths, out_dataset_dir):
                 )
             image_dict[k] = np.stack(resized_images)
         print("Resizing images in episode complete!")
+        # Filter image_dict to only include the cameras we resized
+        filtered_image_dict = {k: image_dict[k] for k in cam_names if k in image_dict}
         # Save preprocessed episode
         data_dict = dict(
             qpos=qpos,
             qvel=qvel,
             effort=effort,
             action=action,
-            image_dict=image_dict,
+            image_dict=filtered_image_dict,
             is_sim=is_sim,
         )
         save_new_hdf5(out_dataset_dir, data_dict, idx)
