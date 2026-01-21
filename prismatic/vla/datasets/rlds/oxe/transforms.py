@@ -930,4 +930,8 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "aloha1_fold_shirt_30_demos": aloha_dataset_transform,
     "aloha1_scoop_X_into_bowl_45_demos": aloha_dataset_transform,
     "aloha1_put_X_into_pot_300_demos": aloha_dataset_transform,
+    # own task
+    "aloha_battery_dataset": aloha_dataset_transform,
+    "aloha_velcro_dataset": aloha_dataset_transform,
+    "aloha_combined_task": aloha_dataset_transform,
 }

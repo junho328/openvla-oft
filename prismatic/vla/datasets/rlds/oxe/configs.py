@@ -706,4 +706,40 @@ OXE_DATASET_CONFIGS = {
         "state_encoding": StateEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
     },
+    "aloha_battery_dataset": {
+    "image_obs_keys": {
+        "primary": "image",
+        "secondary": None,
+        "left_wrist": "left_wrist_image",
+        "right_wrist": "right_wrist_image"
+    },
+    "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+    "state_obs_keys": ["state"],
+    "state_encoding": StateEncoding.JOINT_BIMANUAL,
+    "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    },
+    "aloha_velcro_dataset": {
+    "image_obs_keys": {
+        "primary": "image",
+        "secondary": None,
+        "left_wrist": "left_wrist_image",
+        "right_wrist": "right_wrist_image"
+    },
+    "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+    "state_obs_keys": ["state"],
+    "state_encoding": StateEncoding.JOINT_BIMANUAL,
+    "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    },
+    "aloha_combined_task": {
+    "image_obs_keys": {
+        "primary": "image",
+        "secondary": None,
+        "left_wrist": "left_wrist_image",
+        "right_wrist": "right_wrist_image"
+    },
+    "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+    "state_obs_keys": ["state"],
+    "state_encoding": StateEncoding.JOINT_BIMANUAL,
+    "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    }
 }

@@ -226,5 +226,17 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     "aloha1_put_X_into_pot_300_demos": [
         ("aloha1_put_X_into_pot_300_demos", 1.0),
     ],
+    # own task
+    "aloha_battery_task": [
+        ("aloha_battery_dataset", 1.0),
+    ],
+    "aloha_velcro_task": [
+        ("aloha_velcro_dataset", 1.0),
+    ],
+    # Combined ALOHA tasks (battery + velcro)
+    "aloha_combined_task": [
+        ("aloha_battery_dataset", 1.0),  # weight 1.0 = equal sampling
+        ("aloha_velcro_dataset", 1.0),   # weight 1.0 = equal sampling
+    ],
 # fmt: on
 }

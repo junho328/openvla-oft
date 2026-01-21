@@ -170,28 +170,29 @@ RLDS 데이터셋을 OpenVLA에 등록합니다.
 
 ```bash
 # GPU 개수에 맞게 --nproc-per-node 값 수정
-torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/finetune.py \
-  --vla_path openvla/openvla-7b \
-  --data_root_dir /path/to/rlds/output/ \
-  --dataset_name my_aloha_task_49_demos \
-  --run_root_dir /path/to/checkpoints/ \
+torchrun --standalone --nnodes 1 --nproc-per-node 4 vla-scripts/finetune.py \
+  --vla_path /home/work/aipr-jhna/huggingface_hub/openvla-7b\
+  --data_root_dir /home/work/aipr-jhna/output/aloha_combined_rlds \
+  --dataset_name aloha_combined_task \
+  --run_root_dir /home/work/aipr-jhna/output/aloha_finetune \
   --use_l1_regression True \
   --use_diffusion False \
   --use_film True \
   --num_images_in_input 3 \
   --use_proprio True \
-  --batch_size 4 \
+  --batch_size 16 \
+  --grad_accumulation_steps 4 \
   --learning_rate 5e-4 \
   --num_steps_before_decay 50000 \
-  --max_steps 100005 \
+  --max_steps 100000 \
   --use_val_set True \
   --val_freq 10000 \
   --save_freq 10000 \
   --save_latest_checkpoint_only False \
   --image_aug True \
   --lora_rank 32 \
-  --wandb_entity "YOUR_WANDB_ENTITY" \
-  --wandb_project "YOUR_WANDB_PROJECT" \
+  --wandb_entity "acpo" \
+  --wandb_project "aloha-finetune" \
   --run_id_note my_aloha_task_training
 ```
 
