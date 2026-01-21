@@ -155,3 +155,22 @@ wandb/
 *.txt
 logs/
 runs/
+# Experiment outputs (videos and large files)
+experiment_outputs/
+test_outputs/
+masking_verification/
+rollouts/
+
+# Model cache
+.cache/
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Logs
+*.log
+nohup.out
+
+# Virtual environment
+.venv/
